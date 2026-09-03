@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#e8e3d8" />
+    <link rel="icon" href="data:," />
+    <title>NanoVLA — SO-101 Data Collector</title>
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="#" aria-label="NanoVLA home">
+          <span class="brand-mark">N</span>
+          <span>NanoVLA</span>
+        </a>
+        <div class="topbar-meta">
+          <span>SO-101 / SIM</span>
+          <span class="system-state"><i></i> LOCAL</span>
+        </div>
+      </header>
+
+      <section class="workspace">
+        <div class="stage-panel">
+          <div id="scene" class="scene" aria-label="Three.js robot scene"></div>
+          <div class="stage-label">
+            <span>CAM 01</span>
+            <span>DRAG TO ORBIT · SCROLL TO ZOOM</span>
+          </div>
+          <div id="recording-badge" class="recording-badge" hidden>
+            <i></i> REC
+          </div>
+          <div class="axis-mark" aria-hidden="true">
+            <span class="axis-y">Y</span>
+            <span class="axis-x">X</span>
+            <span class="axis-z">Z</span>
+          </div>
+        </div>
+
+        <aside class="control-panel">
+          <section class="panel-section instruction-section">
+            <div class="section-heading">
+              <span>01</span>
+              <h2>Task instruction</h2>
+            </div>
+            <label class="sr-only" for="instruction">Task instruction</label>
+            <textarea id="instruction" rows="2">Move the red cube to the target.</textarea>
+          </section>
+
+          <section class="panel-section">
+            <div class="section-heading">
+              <span>02</span>
+              <h2>Joint targets</h2>
+            </div>
+            <div id="joint-controls" class="joint-controls"></div>
+            <button id="reset-button" class="text-button" type="button">Reset pose</button>
+          </section>
+
+          <section class="panel-section capture-section">
+            <div class="section-heading">
+              <span>03</span>
+              <h2>Capture episode</h2>
+            </div>
+            <div class="capture-stats">
+              <div><strong id="frame-count">000</strong><span>frames</span></div>
+              <div><strong id="duration">00.0</strong><span>seconds</span></div>
+              <div><strong>05</strong><span>Hz</span></div>
+            </div>
+            <div class="capture-actions">
+              <button id="record-button" class="record-button" type="button"><i></i> Record</button>
+              <button id="stop-button" class="secondary-button" type="button" disabled>Stop</button>
+            </div>
+            <div class="secondary-actions">
+              <button id="replay-button" class="text-button" type="button" disabled>Replay</button>
+              <button id="download-button" class="text-button" type="button" disabled>Download JSON</button>
+            </div>
+          </section>
+
+          <section class="sensor-strip">
+            <div>
+              <span>OBSERVATION CAMERA</span>
+              <small>256 × 192 / JPEG</small>
+            </div>
+            <img id="observation-preview" alt="Latest recorded observation" />
+          </section>
+        </aside>
+      </section>
+
+      <footer class="statusbar">
+        <span id="status-message">READY — adjust a joint, then start recording</span>
+        <span>NANOVLA COLLECTOR · EPISODE 001</span>
+      </footer>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
