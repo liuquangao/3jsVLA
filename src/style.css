@@ -311,6 +311,63 @@ input[type="range"]::-webkit-slider-thumb {
   margin-top: 14px;
 }
 
+.task-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+}
+
+.task-state {
+  color: var(--muted);
+  font-family: "DM Mono", monospace;
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.task-state.is-success {
+  color: var(--signal);
+}
+
+.generate-row {
+  display: grid;
+  grid-template-columns: 1fr 62px 88px;
+  gap: 8px;
+  align-items: center;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.generate-row label {
+  color: var(--muted);
+  font-family: "DM Mono", monospace;
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.generate-row input {
+  width: 100%;
+  padding: 6px 8px;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  outline: none;
+  background: rgba(255, 255, 255, 0.28);
+  font-family: "DM Mono", monospace;
+  font-size: 11px;
+  text-align: center;
+}
+
+.generate-row input:focus {
+  border-color: var(--ink);
+}
+
+.generate-row .secondary-button {
+  padding: 7px 0;
+}
+
 .capture-stats {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

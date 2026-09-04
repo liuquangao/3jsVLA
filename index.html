@@ -44,7 +44,11 @@
               <h2>Task instruction</h2>
             </div>
             <label class="sr-only" for="instruction">Task instruction</label>
-            <textarea id="instruction" rows="2">Move the red cube to the target.</textarea>
+            <textarea id="instruction" rows="2">Move the red cube to the circle.</textarea>
+            <div class="task-row">
+              <button id="new-task-button" class="text-button" type="button">New task</button>
+              <span id="task-state" class="task-state">Not placed</span>
+            </div>
           </section>
 
           <section class="panel-section">
@@ -73,6 +77,15 @@
             <div class="secondary-actions">
               <button id="replay-button" class="text-button" type="button" disabled>Replay</button>
               <button id="download-button" class="text-button" type="button" disabled>Download JSON</button>
+            </div>
+
+            <div class="generate-row">
+              <label for="episode-count">Auto-generate</label>
+              <input id="episode-count" type="number" min="1" max="500" step="1" value="20" />
+              <button id="generate-button" class="secondary-button" type="button">Generate</button>
+            </div>
+            <div class="secondary-actions">
+              <button id="dataset-button" class="text-button" type="button" disabled>Download dataset</button>
             </div>
           </section>
 

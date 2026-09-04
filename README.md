@@ -10,9 +10,10 @@ The goal is to let users build each part step by step:
 4. Train a small policy with behavior cloning.
 5. Run the policy in the environment and evaluate the result.
 
-The first working component is a browser-based data collector built with Three.js. It loads the
-official Galaxea (星海图) A1Z URDF with the G1Z parallel gripper, using the vendor's own STL
-meshes and joint names (`arm_joint1` … `arm_joint6`).
+The first working component is a browser-based data collector built with Three.js and Rapier. It
+loads the official Galaxea (星海图) A1Z URDF with the G1Z parallel gripper, using the vendor's own
+STL meshes and joint names (`arm_joint1` … `arm_joint6`), and puts it in front of three coloured
+cubes and two target zones that it can actually pick up and put down.
 
 ## Run the Collector
 
@@ -21,8 +22,9 @@ npm install
 npm run dev
 ```
 
-Open the local URL shown by Vite. Adjust the seven A1Z controls, record an episode, replay it, and
-download the result as JSON.
+Open the local URL shown by Vite. Set a count, press **Generate**, and it collects that many
+episodes on its own, then hands you the dataset as JSON. The joint sliders are still there to
+record an episode by hand, but they are for seeing how the loop works, not for bulk collection.
 
 The robot is chosen by a query parameter, so the earlier SO-101 arm is still one URL away:
 
@@ -35,15 +37,89 @@ Both arms are entries in the `ROBOTS` table at the top of `src/main.ts`. An entr
 URDF, where the base is mounted, the two camera framings, and one slider per control — so adding a
 third arm means adding a `RobotSpec`, not editing the collector.
 
-## Minimal Task
+## The Task
 
-The first task will be simple: move an object to a target location based on a language instruction.
+Move a named cube to a named zone. Three cubes (red, green, blue) and two zones (a circle and a
+square) give six distinct tasks that all share the same scene, and every episode re-scatters the
+cubes and zones and re-rolls the instruction:
 
 ```text
-Instruction: "Move the red cube to the blue area."
+Instruction: "Move the green cube to the square."
 Observation: RGB image + robot state
-Action: Six joint targets + gripper target
+Action:      Six joint targets + gripper target
+Success:     named cube at rest inside the named zone, no longer held
 ```
+
+The point of three cubes and two zones is that **the instruction has to be read**. With a single
+cube and a single target, a policy scores perfectly while ignoring the language entirely, and
+nothing in the training curves tells you the language channel is dead. Here the same image maps
+to different actions depending on the sentence.
+
+## Generating Data
+
+Demonstrations are scripted, not teleoperated. Dragging seven sliders produces trajectories that
+move one joint at a time, and a policy trained on those learns slider-wiggling rather than
+reaching — so the collector drives itself instead.
+
+Each episode: reach over the named cube, drop onto it, close, lift, carry to the named zone,
+lower, let go. Every episode re-rolls the layout, the instruction, the approach pitch, the hover
+and drop heights, a few millimetres of aim error on the grasp, up to 4 cm on where in the zone it
+aims, and the angle the cube is set down at — so a batch is a spread of demonstrations rather than
+one motion repeated.
+
+On this machine it runs at roughly **one episode per second of wall time**, 100% success, giving
+4–7 second episodes of 21–37 frames each. 20 episodes is about 3 MB of JSON, so 200 is about
+30 MB — fine as a single download, but it is a single blob held in memory, so this is the point
+where a real dataset writer starts to earn its place.
+
+Generation is driven from the animation loop in ~8 ms slices, so the page keeps rendering and you
+can watch it collect. That also means it needs a **foreground tab** — a backgrounded tab stops
+getting animation frames and generation stalls until you come back.
+
+Three knobs worth knowing, all constants in `src/main.ts`:
+
+| Knob | Does what |
+| --- | --- |
+| `ARM_SPEED` | Demonstration speed. At 60 deg/s and 5 Hz capture there are ~12° between consecutive actions. |
+| `CAPTURE_HZ` | Raise it if a policy needs finer action steps than that. |
+| `jitter(...)` in `buildScript` | Aim error. Widen it to breed failures into the dataset; right now essentially every episode succeeds. |
+
+## Inverse Kinematics
+
+Scripting the arm needs IK, and the A1Z's geometry hands you a closed form. J1 takes the azimuth
+and J2/J3/J4 all turn about Y, so once the tool pitch is fixed what remains is a planar two-link
+problem. Working in the (radial, height) plane as complex numbers — where a turn of q about Y is
+a multiply by e^-iq — it solves exactly, with no iteration. `solveA1Z` in `src/main.ts` is about
+forty lines and lands the jaw on target to within a rounding error.
+
+Height costs pitch, and it costs a lot at the edge of the workspace:
+
+| Radius | Max jaw height, tool straight down | at 80° | at 70° |
+| --- | --- | --- | --- |
+| 0.30 m | 0.108 m | 0.157 m | 0.207 m |
+| 0.36 m | 0.094 m | 0.153 m | 0.212 m |
+| 0.43 m | 0.057 m | 0.131 m | 0.199 m |
+
+J4 tops out at ±75° and the wrist has no offset to make up the difference, so a far-out top-down
+grasp cannot lift its approach very high. The script therefore prefers a vertical grasp and tilts
+only as far as the reach demands, sweeping the pitch down from a steep start until every waypoint
+solves.
+
+## Physics
+
+Rapier simulates the props only. The cubes are dynamic rigid bodies with box colliders, the table
+is a static box, and objects fall, topple, slide, collide with each other and roll out of a zone
+if you drop them badly — all of which lands in the dataset as failure modes a policy can learn to
+recover from.
+
+The arm stays kinematic: it is driven straight from the joint controls and carries no colliders.
+That keeps the recorded actions clean and avoids the soft, drooping serial chain that an impulse
+solver gives you for a force-driven arm. Grasping is a kinematic attach for the same reason — the
+cube snaps to the jaw when the gripper closes on it, which never jitters and makes the pickup
+moment obvious. Releasing hands the cube back to the physics world carrying the jaw's velocity.
+
+The trade-off is that the arm is infinitely stiff and passes through anything it is not gripping.
+Giving the links colliders is the natural next step if that starts to matter.
 
 The first version will use:
 
@@ -73,7 +149,7 @@ NanoVLA/
 │   ├── a1z/                     # Galaxea A1Z + G1Z URDF and STL meshes
 │   └── so101/                   # SO-101 URDF and STL meshes
 ├── src/
-│   ├── main.ts     # Robot table, Three.js scene, joint controls, and recorder
+│   ├── main.ts     # Robot table, scene, physics, task sampling, controls, recorder
 │   └── style.css   # Collector interface
 ├── index.html
 └── package.json
@@ -82,21 +158,44 @@ NanoVLA/
 Each downloaded episode is a JSON file containing:
 
 ```text
-instruction
+instruction: "Move the green cube to the square."
 robot: "a1z"
+task: { object: "green", target: "square" }
 capture_hz: 5
+success: true
 frames[]
 ├── timestamp
-├── observation.image
-├── observation.joint_positions
-└── action.joint_targets
+├── observation.image             # 256 x 192 JPEG data URL
+├── observation.joint_positions  # where the arm is
+├── observation.object_poses     # ground truth, for debugging and scoring
+├── observation.grasped          # which cube is in the gripper, or null
+└── action.joint_targets         # where the arm was told to go
 ```
+
+`joint_positions` is the state and `joint_targets` is the action. In a generated episode the
+action is the commanded pose one capture interval ahead — what a policy would have to emit at
+that frame to produce the motion that follows.
+
+**Generate** hands you every episode in one file instead:
+
+```text
+format: "nanovla.dataset.v1"
+robot: "a1z"
+capture_hz: 5
+episodes[]        # each one exactly as above
+```
+
+Generated episodes run on a fixed simulated clock rather than wall time, so the dataset comes out
+the same however fast the machine is, and a stalled tab cannot stretch a trajectory.
 
 ## Roadmap
 
 - [x] Create the Three.js tabletop environment
 - [x] Load and control the official A1Z + G1Z URDF model
 - [x] Record and replay joint-control demonstrations
+- [x] Simulate the props with Rapier and grasp them
+- [x] Randomise the scene and make the instruction disambiguating
+- [x] Closed-form IK and a scripted policy that generates episodes on its own
 - [ ] Train a small behavior-cloning policy
 - [ ] Connect the policy to the browser environment
 - [ ] Evaluate the complete closed-loop system
