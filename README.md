@@ -10,7 +10,9 @@ The goal is to let users build each part step by step:
 4. Train a small policy with behavior cloning.
 5. Run the policy in the environment and evaluate the result.
 
-The first working component is a browser-based SO-101 data collector built with Three.js. It loads the official SO-101 URDF and STL meshes from TheRobotStudio.
+The first working component is a browser-based data collector built with Three.js. It loads the
+official Galaxea (星海图) A1Z URDF with the G1Z parallel gripper, using the vendor's own STL
+meshes and joint names (`arm_joint1` … `arm_joint6`).
 
 ## Run the Collector
 
@@ -19,7 +21,19 @@ npm install
 npm run dev
 ```
 
-Open the local URL shown by Vite. Adjust the six SO-101 controls, record an episode, replay it, and download the result as JSON.
+Open the local URL shown by Vite. Adjust the seven A1Z controls, record an episode, replay it, and
+download the result as JSON.
+
+The robot is chosen by a query parameter, so the earlier SO-101 arm is still one URL away:
+
+```text
+http://localhost:5173/            # Galaxea A1Z + G1Z (default)
+http://localhost:5173/?robot=so101   # SO-101
+```
+
+Both arms are entries in the `ROBOTS` table at the top of `src/main.ts`. An entry declares its
+URDF, where the base is mounted, the two camera framings, and one slider per control — so adding a
+third arm means adding a `RobotSpec`, not editing the collector.
 
 ## Minimal Task
 
@@ -28,7 +42,7 @@ The first task will be simple: move an object to a target location based on a la
 ```text
 Instruction: "Move the red cube to the blue area."
 Observation: RGB image + robot state
-Action: Five joint targets + gripper target
+Action: Six joint targets + gripper target
 ```
 
 The first version will use:
@@ -55,9 +69,11 @@ Three.js provides the scene, camera, rendering, and browser interface. Simple ki
 
 ```text
 NanoVLA/
-├── public/assets/robots/so101/  # Official URDF and STL meshes
+├── public/assets/robots/
+│   ├── a1z/                     # Galaxea A1Z + G1Z URDF and STL meshes
+│   └── so101/                   # SO-101 URDF and STL meshes
 ├── src/
-│   ├── main.ts     # Three.js scene, SO-101 controls, and recorder
+│   ├── main.ts     # Robot table, Three.js scene, joint controls, and recorder
 │   └── style.css   # Collector interface
 ├── index.html
 └── package.json
@@ -67,7 +83,7 @@ Each downloaded episode is a JSON file containing:
 
 ```text
 instruction
-robot: "so101"
+robot: "a1z"
 capture_hz: 5
 frames[]
 ├── timestamp
@@ -79,7 +95,7 @@ frames[]
 ## Roadmap
 
 - [x] Create the Three.js tabletop environment
-- [x] Load and control the official SO-101 URDF model
+- [x] Load and control the official A1Z + G1Z URDF model
 - [x] Record and replay joint-control demonstrations
 - [ ] Train a small behavior-cloning policy
 - [ ] Connect the policy to the browser environment
