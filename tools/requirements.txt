@@ -1,0 +1,17 @@
+# Environment for tools/to_lerobot.py.
+#
+# lerobot pins torch<2.12, and installing it plainly pulls the CUDA build — about 3 GB of
+# NVIDIA libraries this converter never touches. Install the matching CPU wheels instead:
+#
+#   python3 -m venv .venv
+#   .venv/bin/pip install -r tools/requirements.txt
+#   .venv/bin/pip install --force-reinstall --no-deps \
+#       torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cpu
+#
+# That lands at ~1.7 GB instead of ~5 GB. If you do want CUDA, skip the second command.
+#
+# Needs Python >= 3.12 (lerobot's own floor). Dataset v3.0 needs lerobot >= 0.4.0.
+
+lerobot[dataset]>=0.4.0
+pillow
+numpy

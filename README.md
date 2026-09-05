@@ -68,9 +68,11 @@ aims, and the angle the cube is set down at — so a batch is a spread of demons
 one motion repeated.
 
 On this machine it runs at roughly **one episode per second of wall time**, 100% success, giving
-4–7 second episodes of 21–37 frames each. 20 episodes is about 3 MB of JSON, so 200 is about
-30 MB — fine as a single download, but it is a single blob held in memory, so this is the point
-where a real dataset writer starts to earn its place.
+4–7 second episodes of 21–37 frames each.
+
+Pressing Generate asks for a folder and streams episodes into it as they finish, so memory stays
+flat however many you ask for. Browsers without the File System Access API (Firefox, Safari) fall
+back to collecting in memory and handing the lot over as one JSON download.
 
 Generation is driven from the animation loop in ~8 ms slices, so the page keeps rendering and you
 can watch it collect. That also means it needs a **foreground tab** — a backgrounded tab stops
@@ -83,6 +85,46 @@ Three knobs worth knowing, all constants in `src/main.ts`:
 | `ARM_SPEED` | Demonstration speed. At 60 deg/s and 5 Hz capture there are ~12° between consecutive actions. |
 | `CAPTURE_HZ` | Raise it if a policy needs finer action steps than that. |
 | `jitter(...)` in `buildScript` | Aim error. Widen it to breed failures into the dataset; right now essentially every episode succeeds. |
+
+## Getting the Data Out
+
+The collector writes a deliberately dumb tree — one directory per episode, frames as plain JPEGs:
+
+```text
+<folder you picked>/
+├── meta.json                       # robot, capture_hz, image size, joint names, counts
+└── episodes/episode_00000/
+    ├── episode.json                # instruction, task, success, per-frame state/action
+    └── frames/000000.jpg …
+```
+
+`tools/to_lerobot.py` turns that into a **LeRobotDataset v3.0**:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r tools/requirements.txt
+.venv/bin/python tools/to_lerobot.py <folder> --repo-id you/nanovla-a1z --root ./lerobot_out
+```
+
+It drives `LeRobotDataset` itself rather than writing Parquet and MP4 by hand, so the on-disk
+format stays correct without the script having to know what it looks like — parquet shards, AV1
+video, episode offsets and normalisation stats are all lerobot's job. The result loads straight
+back:
+
+```python
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+ds = LeRobotDataset("you/nanovla-a1z", root="./lerobot_out")
+ds[20]["observation.images.front"]  # torch.float32 [3, 192, 256], decoded from the mp4
+ds[20]["task"]                      # "Move the red cube to the circle."
+```
+
+Two things worth knowing before you install: lerobot pins `torch<2.12` and installing it plainly
+drags in ~3 GB of CUDA libraries this converter never uses — `tools/requirements.txt` documents
+the CPU-only route, which lands at 1.7 GB instead of 5 GB. And v3.0 needs `lerobot >= 0.4.0` and
+Python >= 3.12.
+
+Episode ground truth (`object_poses`, `grasped`) is kept in the dump and ignored by the
+converter; it is there for debugging and for scoring an evaluation run, not for training.
 
 ## Inverse Kinematics
 
@@ -145,6 +187,9 @@ Three.js provides the scene, camera, rendering, and browser interface. Simple ki
 
 ```text
 NanoVLA/
+├── tools/
+│   ├── to_lerobot.py            # dump -> LeRobotDataset v3.0
+│   └── requirements.txt
 ├── public/assets/robots/
 │   ├── a1z/                     # Galaxea A1Z + G1Z URDF and STL meshes
 │   └── so101/                   # SO-101 URDF and STL meshes
@@ -176,14 +221,8 @@ frames[]
 action is the commanded pose one capture interval ahead — what a policy would have to emit at
 that frame to produce the motion that follows.
 
-**Generate** hands you every episode in one file instead:
-
-```text
-format: "nanovla.dataset.v1"
-robot: "a1z"
-capture_hz: 5
-episodes[]        # each one exactly as above
-```
+Generated episodes go to a folder as the tree above, or — where the browser cannot write to one —
+come back as a single file of the same episodes under `format: "nanovla.dataset.v1"`.
 
 Generated episodes run on a fixed simulated clock rather than wall time, so the dataset comes out
 the same however fast the machine is, and a stalled tab cannot stretch a trajectory.
@@ -196,6 +235,7 @@ the same however fast the machine is, and a stalled tab cannot stretch a traject
 - [x] Simulate the props with Rapier and grasp them
 - [x] Randomise the scene and make the instruction disambiguating
 - [x] Closed-form IK and a scripted policy that generates episodes on its own
+- [x] Stream episodes to disk and convert them to LeRobotDataset v3.0
 - [ ] Train a small behavior-cloning policy
 - [ ] Connect the policy to the browser environment
 - [ ] Evaluate the complete closed-loop system

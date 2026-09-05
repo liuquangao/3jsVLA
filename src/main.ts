@@ -281,6 +281,9 @@ const SAMPLE_INTERVAL = 1000 / CAPTURE_HZ;
 /** Work surface is the top of this box, at y = 0. */
 const TABLE = { width: 1.18, thickness: 0.07, depth: 0.82 };
 const PHYSICS_STEP = 1 / 120;
+/** What the policy sees. The converter reads these back out of the dump's meta.json. */
+const OBSERVATION_WIDTH = 256;
+const OBSERVATION_HEIGHT = 192;
 
 type PropId = "red" | "green" | "blue";
 type ZoneShape = "circle" | "square";
@@ -333,7 +336,13 @@ let task: Task = { object: "red", target: "circle", instruction: "" };
 let frames: EpisodeFrame[] = [];
 let dataset: Array<ReturnType<typeof buildEpisode>> = [];
 let script: { plan: Script; time: number; tick: number } | null = null;
-let generation: { requested: number; completed: number; succeeded: number } | null = null;
+let generation: {
+  requested: number;
+  completed: number;
+  succeeded: number;
+  /** Set while an episode is being flushed to disk; ticking resumes when it settles. */
+  flushing: boolean;
+} | null = null;
 let recording = false;
 let recordStart = 0;
 let lastSample = 0;
@@ -364,12 +373,12 @@ orbitControls.minDistance = spec.view.distance[0];
 orbitControls.maxDistance = spec.view.distance[1];
 orbitControls.maxPolarAngle = Math.PI * 0.49;
 
-const observationCamera = new THREE.PerspectiveCamera(46, 4 / 3, 0.01, 10);
+const observationCamera = new THREE.PerspectiveCamera(46, OBSERVATION_WIDTH / OBSERVATION_HEIGHT, 0.01, 10);
 observationCamera.position.set(...spec.view.obsCamera);
 observationCamera.lookAt(...spec.view.obsTarget);
 
 const observationRenderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
-observationRenderer.setSize(256, 192, false);
+observationRenderer.setSize(OBSERVATION_WIDTH, OBSERVATION_HEIGHT, false);
 observationRenderer.outputColorSpace = THREE.SRGBColorSpace;
 observationRenderer.toneMapping = THREE.ACESFilmicToneMapping;
 observationRenderer.toneMappingExposure = 1.05;
@@ -1056,6 +1065,86 @@ function resetPose() {
 }
 
 /**
+ * Streams episodes to a folder the user picks, one directory each, images as plain JPEG files.
+ * The alternative — accumulating everything and handing over one JSON blob — holds the whole
+ * dataset in memory and pays a third again in size for base64, which stops being reasonable at
+ * a couple of hundred episodes. `tools/to_lerobot.py` turns this tree into a LeRobotDataset.
+ */
+declare global {
+  // Not in TypeScript's DOM lib yet; everything else the writer touches already is.
+  interface Window {
+    showDirectoryPicker(options?: { mode?: "read" | "readwrite" }): Promise<FileSystemDirectoryHandle>;
+  }
+}
+
+type DiskWriter = {
+  root: FileSystemDirectoryHandle;
+  episodes: FileSystemDirectoryHandle;
+  written: number;
+};
+
+let writer: DiskWriter | null = null;
+
+const canWriteToDisk = () => "showDirectoryPicker" in window;
+
+/** JPEG data URL to bytes, so a frame can be written without a round trip through base64. */
+function dataUrlToBlob(dataUrl: string) {
+  const binary = atob(dataUrl.slice(dataUrl.indexOf(",") + 1));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return new Blob([bytes], { type: "image/jpeg" });
+}
+
+async function writeFile(directory: FileSystemDirectoryHandle, name: string, contents: Blob | string) {
+  const handle = await directory.getFileHandle(name, { create: true });
+  const stream = await handle.createWritable();
+  await stream.write(contents);
+  await stream.close();
+}
+
+/** Writes one episode as its own directory: the frames as JPEGs, everything else as JSON. */
+async function writeEpisode(episode: ReturnType<typeof buildEpisode>, index: number) {
+  const name = `episode_${String(index).padStart(5, "0")}`;
+  const directory = await writer!.episodes.getDirectoryHandle(name, { create: true });
+  const frameDirectory = await directory.getDirectoryHandle("frames", { create: true });
+
+  const record = {
+    ...episode,
+    frames: await Promise.all(
+      episode.frames.map(async (frame, frameIndex) => {
+        const file = `${String(frameIndex).padStart(6, "0")}.jpg`;
+        await writeFile(frameDirectory, file, dataUrlToBlob(frame.observation.image));
+        const { image: _image, ...observation } = frame.observation;
+        return { ...frame, observation: { ...observation, image_path: `frames/${file}` } };
+      }),
+    ),
+  };
+  await writeFile(directory, "episode.json", JSON.stringify(record));
+  writer!.written += 1;
+}
+
+async function writeDatasetMeta(summary: { completed: number; succeeded: number }) {
+  await writeFile(
+    writer!.root,
+    "meta.json",
+    JSON.stringify(
+      {
+        format: "nanovla.dump.v1",
+        robot: spec.id,
+        capture_hz: CAPTURE_HZ,
+        image: { width: OBSERVATION_WIDTH, height: OBSERVATION_HEIGHT },
+        joints: JOINTS.map((joint) => joint.name),
+        episodes: summary.completed,
+        successes: summary.succeeded,
+        created_at: new Date().toISOString(),
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+/**
  * Generated episodes run on a fixed simulated clock rather than wall time, so the dataset is the
  * same however fast the browser happens to be, and pausing the tab cannot stretch a trajectory.
  */
@@ -1113,28 +1202,54 @@ function finishGeneration(problem?: string) {
   downloadButton.disabled = frames.length === 0;
   const rate = summary.completed ? Math.round((summary.succeeded / summary.completed) * 100) : 0;
   const done = `${summary.completed} EPISODES — ${summary.succeeded} SUCCEEDED (${rate}%)`;
-  statusElement.textContent = problem
-    ? `STOPPED AFTER ${done} — ${problem}`
-    : `GENERATED ${done}`;
+  const target = writer ? ` INTO ${writer.root.name}/` : "";
+  const report = problem ? `STOPPED AFTER ${done} — ${problem}` : `GENERATED ${done}${target}`;
+
+  if (writer) {
+    const finished = writer;
+    writeDatasetMeta(summary)
+      .then(() => {
+        statusElement.textContent = `${report} — RUN tools/to_lerobot.py ON ${finished.root.name}/`;
+      })
+      .catch((error) => {
+        statusElement.textContent = `${report} — COULD NOT WRITE meta.json: ${error}`;
+      });
+  }
+  statusElement.textContent = report;
 }
 
-function startGeneration() {
+async function startGeneration() {
   if (!spec.solve) {
     statusElement.textContent = `NO IK FOR ${spec.label} — SCRIPTED GENERATION UNAVAILABLE`;
     return;
   }
-  const requested = Math.max(1, Math.min(500, Number(episodeCountElement.value) || 1));
+  const requested = Math.max(1, Math.min(2000, Number(episodeCountElement.value) || 1));
   episodeCountElement.value = String(requested);
+
+  writer = null;
+  if (canWriteToDisk()) {
+    try {
+      // Must be called straight off the click: the picker needs the user gesture.
+      const root = await window.showDirectoryPicker({ mode: "readwrite" });
+      writer = { root, episodes: await root.getDirectoryHandle("episodes", { create: true }), written: 0 };
+    } catch {
+      statusElement.textContent = "NO FOLDER CHOSEN — GENERATION CANCELLED";
+      return;
+    }
+  }
+
   dataset = [];
-  generation = { requested, completed: 0, succeeded: 0 };
+  generation = { requested, completed: 0, succeeded: 0, flushing: false };
   setGenerationControls(true);
   datasetButton.disabled = true;
-  statusElement.textContent = `GENERATING 0/${requested}`;
+  statusElement.textContent = writer
+    ? `GENERATING 0/${requested} — WRITING TO ${writer.root.name}/`
+    : `GENERATING 0/${requested} — IN MEMORY (THIS BROWSER CANNOT WRITE TO A FOLDER)`;
 }
 
 function runGeneration() {
   const deadline = performance.now() + GENERATION_BUDGET_MS;
-  while (generation && performance.now() < deadline) {
+  while (generation && !generation.flushing && performance.now() < deadline) {
     if (!script) {
       if (generation.completed >= generation.requested) {
         finishGeneration();
@@ -1147,12 +1262,28 @@ function runGeneration() {
     }
     if (!advanceScript()) {
       const episode = buildEpisode();
-      dataset.push(episode);
+      const index = generation.completed;
       generation.completed += 1;
       if (episode.success) generation.succeeded += 1;
       script = null;
       statusElement.textContent =
         `GENERATING ${generation.completed}/${generation.requested} — ${generation.succeeded} SUCCEEDED`;
+
+      if (writer) {
+        // Hand it to disk and stop ticking until it lands, so memory stays flat.
+        const pending = generation;
+        pending.flushing = true;
+        writeEpisode(episode, index)
+          .then(() => {
+            pending.flushing = false;
+          })
+          .catch((error) => {
+            pending.flushing = false;
+            finishGeneration(`WRITE FAILED: ${error}`);
+          });
+      } else {
+        dataset.push(episode);
+      }
     }
   }
 }
