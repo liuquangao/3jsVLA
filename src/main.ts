@@ -63,14 +63,8 @@ type RobotSpec = {
   };
   /** Keyed by URDF link name. Links absent here keep the colour the URDF declares. */
   finish: Record<string, LinkFinish>;
-  /** Where this arm holds an object, and how closed the gripper has to be to hold it. */
+  /** How the gripper closes on an object. */
   grasp: {
-    /** URDF link the jaw anchor hangs off. */
-    link: string;
-    /** Jaw centre in that link's frame. */
-    anchor: Vec3;
-    /** Half-extents of the graspable pocket around the anchor, in that link's axes. */
-    region: Vec3;
     /**
      * Jaw opening in metres at control 100, when that is a linear function of the control. Given
      * it, the closed position is derived from the cube instead of guessed — guessing is exactly
@@ -105,11 +99,13 @@ const measured = (value: number) => THREE.MathUtils.radToDeg(value);
  * tool pitch is fixed what is left is a planar two-link problem with an exact solution. Working
  * in the (radial, height) plane as complex numbers, a turn of q about Y is a multiply by e^-iq.
  */
+/** Jaw centre along x in the arm_link6 frame: the point the IK aims, between the closed tips. */
+const A1Z_JAW_ANCHOR = 0.17;
 const A1Z_LINKS = {
   shoulder: new THREE.Vector2(0.02, 0.118), // joint 2, from the URDF base
   upper: new THREE.Vector2(-0.264, 0), // joint 2 -> joint 3
   fore: new THREE.Vector2(0.245, 0.06), // joint 3 -> joint 4
-  wrist: new THREE.Vector2(0.074 + 0.0235 + 0.17, 0), // joint 4 -> jaw anchor, with J5 at zero
+  wrist: new THREE.Vector2(0.074 + 0.0235 + A1Z_JAW_ANCHOR, 0), // joint 4 -> jaw, with J5 at zero
 };
 
 /** Wraps an angle into the joint's range using the cube's four-fold symmetry. */
@@ -206,13 +202,8 @@ const A1Z: RobotSpec = {
     gripper_finger_left_link: { color: 0x272b2f, roughness: 0.5, metalness: 0.3 },
     gripper_finger_rIght_link: { color: 0x272b2f, roughness: 0.5, metalness: 0.3 },
   },
-  // The G1Z jaw tips meet at x = 0.183 in the arm_link6 frame and open to 60 mm at control 100.
-  grasp: {
-    link: "arm_link6",
-    anchor: [0.17, 0, 0],
-    region: [0.042, 0.032, 0.032],
-    fullOpening: A1Z_FINGER_STROKE * 2,
-  },
+  // The G1Z jaws open to 60 mm at control 100.
+  grasp: { fullOpening: A1Z_FINGER_STROKE * 2 },
   // A top-down grasp reaches out to 0.47 m at cube height before the ±75° wrist pitch runs out.
   reach: { min: 0.27, max: 0.43, yaw: THREE.MathUtils.degToRad(55) },
   props: { cube: 0.045 },
@@ -255,12 +246,7 @@ const SO101: RobotSpec = {
   finish: {}, // the SO-101 URDF already declares per-link colours
   // The SO-101 jaw swings on a hinge, so its opening is not linear in the control and the closed
   // position is measured rather than derived.
-  grasp: {
-    link: "gripper_frame_link",
-    anchor: [0, 0, 0],
-    region: [0.03, 0.03, 0.03],
-    closedAt: 20,
-  },
+  grasp: { closedAt: 20 },
   reach: { min: 0.13, max: 0.26, yaw: THREE.MathUtils.degToRad(55) },
   props: { cube: 0.025 },
   joints: [
@@ -289,16 +275,16 @@ const spec = ROBOTS.find((entry) => entry.id === requestedRobot) ?? A1Z;
 const JOINTS = spec.joints;
 
 /**
- * Where the jaws sit through a grasp. `GRIPPER_SHUT` is the control value at which the jaws just
- * meet the cube, minus a hair so the grip reads as firm rather than floating; closing past it
- * drives the fingers through the cube. Grab and release thresholds bracket it with hysteresis.
+ * `GRIPPER_SHUT` deliberately commands the jaws *narrower* than the cube. The fingers cannot get
+ * there — the cube is in the way — so the unreachable remainder of the command turns into contact
+ * force, which is what holds the cube up. Command exactly the cube's width instead and the grip
+ * is zero.
  */
+const GRIPPER_SQUEEZE = 0.01;
 const GRIPPER_OPEN = 100;
 const GRIPPER_SHUT = spec.grasp.fullOpening
-  ? THREE.MathUtils.clamp((spec.props.cube / spec.grasp.fullOpening) * 100 - 2, 5, 95)
+  ? THREE.MathUtils.clamp(((spec.props.cube - GRIPPER_SQUEEZE) / spec.grasp.fullOpening) * 100, 0, 95)
   : (spec.grasp.closedAt ?? 45);
-const GRIPPER_GRAB_BELOW = GRIPPER_SHUT + 5;
-const GRIPPER_RELEASE_ABOVE = GRIPPER_SHUT + 15;
 
 const CAPTURE_HZ = 5;
 const SAMPLE_INTERVAL = 1000 / CAPTURE_HZ;
@@ -331,7 +317,6 @@ const GROUP_PROP = 0x0002;
 const GROUP_WORLD = 0x0004;
 const collisionGroups = (member: number, collidesWith: number) => (member << 16) | collidesWith;
 const PROP_FREE_GROUPS = collisionGroups(GROUP_PROP, GROUP_ARM | GROUP_PROP | GROUP_WORLD);
-const PROP_HELD_GROUPS = collisionGroups(GROUP_PROP, GROUP_PROP | GROUP_WORLD);
 
 /** What the policy sees. The converter reads these back out of the dump's meta.json. */
 const OBSERVATION_WIDTH = 256;
@@ -600,77 +585,45 @@ robot.traverse((object) => {
 });
 scene.add(robot);
 
-// An empty parented to the gripper link: reading its world transform gives us the jaw pose
-// for free, including the robot root's Z-up-to-Y-up rotation.
-const jawAnchor = new THREE.Object3D();
-jawAnchor.position.set(...spec.grasp.anchor);
-robot.links[spec.grasp.link].add(jawAnchor);
-
-let heldProp: Prop | null = null;
+/**
+ * Grasping is friction, not a trick.
+ *
+ * Earlier this was a kinematic attach: the cube was pinned to the jaw and its collision with the
+ * arm switched off while held. That made the grip unfalsifiable — commanding the jaws past the
+ * cube drove the fingers straight through it instead of stalling against it, and letting go threw
+ * the cube because the jaw's velocity had to be handed over by hand.
+ *
+ * Now the fingers are force-limited position motors told to close tighter than the cube. They
+ * stall on it, the leftover command becomes squeeze, and the cube is held by nothing but contact
+ * friction between two jaw plates. It can therefore also slip, be knocked aside on approach, or
+ * be dropped — all of which are real outcomes worth having in a dataset.
+ */
 let physicsAccumulator = 0;
-const jawPosition = new THREE.Vector3();
-const jawRotation = new THREE.Quaternion();
-const previousJawPosition = new THREE.Vector3();
-const jawInverse = new THREE.Quaternion();
-const heldRotation = new THREE.Quaternion();
-const scratch = new THREE.Vector3();
 
-function setPropDynamic(prop: Prop) {
-  prop.body.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
-}
+/** The cube currently pinched between both jaws, recomputed once per step from contacts. */
+let gripped: Prop | null = null;
+let grippedReport: Prop | null = null;
 
-/** Snaps the prop into the jaw and hands its pose over to the gripper. */
-function grabProp(prop: Prop) {
-  heldProp = prop;
-  heldRotation.copy(jawInverse).multiply(prop.mesh.quaternion);
-  prop.body.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true);
-  // The grasp snaps the cube into the jaw, which now has colliders of its own. Without this the
-  // cube and the fingers would be interpenetrating and shove each other apart.
-  prop.collider.setCollisionGroups(PROP_HELD_GROUPS);
-  statusElement.textContent = `GRIPPED ${prop.label.toUpperCase()} CUBE`;
-}
-
-/** Hands the prop back to the physics world, carrying the jaw's velocity with it. */
-function releaseProp(deltaSeconds: number) {
-  const prop = heldProp;
-  if (!prop) return;
-  heldProp = null;
-  setPropDynamic(prop);
-  prop.collider.setCollisionGroups(PROP_FREE_GROUPS);
-  scratch.copy(jawPosition).sub(previousJawPosition).divideScalar(Math.max(deltaSeconds, PHYSICS_STEP));
-  prop.body.setLinvel(scratch, true);
-  prop.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
-  statusElement.textContent = `RELEASED ${prop.label.toUpperCase()} CUBE`;
-}
-
-function findPropInJaw() {
-  const [rx, ry, rz] = spec.grasp.region;
-  return props.find((prop) => {
-    scratch.copy(prop.mesh.position).sub(jawPosition).applyQuaternion(jawInverse);
-    return Math.abs(scratch.x) <= rx && Math.abs(scratch.y) <= ry && Math.abs(scratch.z) <= rz;
+/** True when the two colliders have at least one live contact point. */
+function touching(a: RAPIER.Collider, b: RAPIER.Collider) {
+  let hit = false;
+  physics.contactPair(a, b, (manifold) => {
+    if (manifold.numContacts() > 0) hit = true;
   });
+  return hit;
 }
 
-function updateGrasp(deltaSeconds: number) {
-  jawAnchor.updateWorldMatrix(true, false);
-  jawPosition.setFromMatrixPosition(jawAnchor.matrixWorld);
-  jawAnchor.getWorldQuaternion(jawRotation);
-  jawInverse.copy(jawRotation).invert();
+function findGrippedProp() {
+  if (fingerColliders.length < 2) return null;
+  return props.find((prop) => fingerColliders.every((finger) => touching(prop.collider, finger))) ?? null;
+}
 
-  const opening = currentValues.gripper;
-  if (heldProp) {
-    if (opening > GRIPPER_RELEASE_ABOVE) {
-      releaseProp(deltaSeconds);
-    } else {
-      heldProp.body.setNextKinematicTranslation(jawPosition);
-      heldProp.body.setNextKinematicRotation(jawRotation.clone().multiply(heldRotation));
-    }
-  } else if (opening < GRIPPER_GRAB_BELOW) {
-    const candidate = findPropInJaw();
-    if (candidate) grabProp(candidate);
-  }
-
-  previousJawPosition.copy(jawPosition);
+function updateGrasp() {
+  gripped = findGrippedProp();
+  if (gripped === grippedReport) return;
+  if (gripped) statusElement.textContent = `GRIPPING ${gripped.label.toUpperCase()} CUBE`;
+  else if (grippedReport) statusElement.textContent = `LET GO OF ${grippedReport.label.toUpperCase()} CUBE`;
+  grippedReport = gripped;
 }
 
 function syncPropMeshes() {
@@ -718,6 +671,15 @@ let motorDamping = 2 * Math.sqrt(5_000_000);
 /** Generous compared to the real arm's 3.5-25 Nm limits: the sim has no gravity-compensation
  *  controller, so the motors carry the whole load themselves. */
 const MOTOR_MAX_FORCE = 1_000_000;
+/**
+ * The finger motors get a real limit instead, because here the cap *is* the grip force. A 45 mm
+ * cube at 700 kg/m3 weighs 0.63 N, and two jaw plates at a combined friction of about 1.0 hold
+ * 2 x mu x F, so this is a wide margin over slipping without being enough to fling anything.
+ */
+const GRIP_FORCE = 30;
+
+/** Jaw plate colliders, used to tell by contact whether something is actually being gripped. */
+const fingerColliders: RAPIER.Collider[] = [];
 /** Cap on hull points per link: the STLs run to tens of thousands of vertices and the hull of a
  *  dense mesh is unchanged by sampling it. */
 const HULL_POINT_BUDGET = 4000;
@@ -739,7 +701,7 @@ type ArmJoint = {
  * plain `traverse` would sweep up every link downstream and hand back a hull enclosing the whole
  * arm from here on. Descending only until the next joint is what keeps one hull to one link.
  */
-function linkHullPoints(link: THREE.Object3D) {
+function linkHullPoints(link: THREE.Object3D, fromX = -Infinity) {
   const toLocal = new THREE.Matrix4().copy(link.matrixWorld).invert();
   const meshes: THREE.Mesh[] = [];
   const collect = (object: THREE.Object3D) => {
@@ -761,6 +723,7 @@ function linkHullPoints(link: THREE.Object3D) {
     const attribute = mesh.geometry.attributes.position;
     for (let index = 0; index < attribute.count; index += stride) {
       vertex.fromBufferAttribute(attribute, index).applyMatrix4(toLink);
+      if (vertex.x < fromX) continue;
       points.push(vertex.x, vertex.y, vertex.z);
     }
   }
@@ -785,6 +748,19 @@ function buildArmDynamics() {
     return null;
   }
 
+  // A finger's blade sits entirely on its own side of the jaw, but its hinge bracket reaches
+  // across the centreline. Hull the whole part and you get a wedge that fills the gap: the two
+  // fingers' hulls overlap, anything between them touches both no matter how wide they are, and
+  // closing the jaws shoves the object instead of gripping it. So fingers are hulled from the
+  // blade outwards. Measured off this gripper; the bracket ends at x = 0.02 in the link frame.
+  const BLADE_FROM_X = 0.02;
+  const fingerLinks = new Set(
+    Object.values(robot.joints)
+      .filter((joint) => joint.jointType === "prismatic")
+      .map((joint) => (joint.children.find((c) => (c as URDFLink).isURDFLink) as URDFLink | undefined)?.urdfName)
+      .filter((name): name is string => Boolean(name)),
+  );
+
   const bodies = new Map<string, RAPIER.RigidBody>();
   const translation = new THREE.Vector3();
   const rotation = new THREE.Quaternion();
@@ -803,7 +779,7 @@ function buildArmDynamics() {
         .setCanSleep(false),
     );
 
-    const points = linkHullPoints(link);
+    const points = linkHullPoints(link, fingerLinks.has(name) ? BLADE_FROM_X : -Infinity);
     const desc = points.length >= 12 ? RAPIER.ColliderDesc.convexHull(points) : null;
     if (desc) {
       const collider = physics.createCollider(
@@ -843,7 +819,13 @@ function buildArmDynamics() {
       | RAPIER.RevoluteImpulseJoint
       | RAPIER.PrismaticImpulseJoint;
     joint.configureMotorModel(RAPIER.MotorModel.AccelerationBased);
-    joint.setMotorMaxForce(MOTOR_MAX_FORCE);
+    // The only prismatic joints on these arms are the gripper fingers.
+    joint.setMotorMaxForce(prismatic ? GRIP_FORCE : MOTOR_MAX_FORCE);
+    if (prismatic) {
+      for (let index = 0; index < child.numColliders(); index += 1) {
+        fingerColliders.push(child.collider(index));
+      }
+    }
     joints.set(name, { joint, parent, child, axis, anchor, prismatic });
   }
 
@@ -1021,7 +1003,7 @@ function captureFrame(seconds: number) {
         position: prop.mesh.position.toArray().map(round4) as [number, number, number],
         quaternion: prop.mesh.quaternion.toArray().map(round4) as [number, number, number, number],
       })),
-      grasped: heldProp?.id ?? null,
+      grasped: gripped?.id ?? null,
     },
     action: {
       joint_targets: cloneJointValues(targetValues),
@@ -1170,12 +1152,6 @@ function sampleLayout() {
 }
 
 function newEpisode() {
-  if (heldProp) {
-    const prop = heldProp;
-    heldProp = null;
-    setPropDynamic(prop);
-  }
-
   let layout = sampleLayout();
   for (let retry = 0; !layout && retry < 20; retry += 1) layout = sampleLayout();
   if (!layout) {
@@ -1219,7 +1195,7 @@ function newEpisode() {
  * level and lined up over the base, so a knocked-over or badly aimed stack simply fails.
  */
 function taskSucceeded() {
-  if (heldProp) return false;
+  if (gripped) return false;
   const cube = spec.props.cube;
   const stack = task.order.map((id) => props.find((entry) => entry.id === id)!);
   const base = stack[0].mesh.position;
@@ -1328,6 +1304,9 @@ function buildStage(sourceId: PropId, level: number): Script | null {
           { pose: at(place, baseYaw, GRIPPER_OPEN) },
           { pose: at(place, baseYaw, GRIPPER_OPEN), hold: 0.7 },
           { pose: at(overPlace, baseYaw, GRIPPER_OPEN) },
+          // The arm lags its command now, so without a beat here the leg can end with the jaws
+          // still around the cube they just placed — a finished stack that scores as a failure.
+          { pose: at(overPlace, baseYaw, GRIPPER_OPEN), hold: 0.8 },
         ];
         if (attempt.every((entry) => entry.pose !== null)) {
           return attempt as Array<{ pose: JointValues; hold?: number }>;
@@ -1493,7 +1472,7 @@ function advanceScript() {
   setRobotPose(currentValues);
   stepPhysics(GENERATION_DT);
   syncArmFromPhysics();
-  updateGrasp(GENERATION_DT);
+  updateGrasp();
 
   if (script.tick % TICKS_PER_CAPTURE === 0) captureFrame(script.clock + script.time);
   script.tick += 1;
@@ -1648,7 +1627,7 @@ function animate(now: number) {
     setRobotPose(currentValues);
     stepPhysics(deltaSeconds);
     syncArmFromPhysics();
-    updateGrasp(deltaSeconds);
+    updateGrasp();
   }
   updateTaskState();
   orbitControls.update();

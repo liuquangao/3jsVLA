@@ -89,9 +89,16 @@ getting animation frames and generation stalls until you come back. Episodes run
 simulated clock rather than wall time, so the dataset comes out the same however fast the machine
 is, and a stalled tab cannot stretch a trajectory.
 
-Expect a substantial share of episodes to fail. Stacking is decided by physics, and now that the
-arm is simulated too it no longer lands exactly where the script commands it. That is the point of
-keeping failures rather than tuning them away.
+Expect most episodes to fail, and expect that to stay true. Three things compound: the stack is
+decided by physics, the arm is simulated so it does not land exactly where the script commands,
+and the grip is friction so it can slip. On a recent run of 12, five got the first cube stacked,
+two got both, and one cleared every check — call it **under 10%**.
+
+That is honest rather than good. A scripted policy that plans exact IK waypoints and assumes it
+arrives is the wrong controller for an arm that lags; closing that loop, rather than slowing the
+script further, is what would move the number. Failures are still worth keeping —
+`--success-only` filters them for behaviour cloning and they are the interesting part for
+anything else — but a behaviour-cloning set wants far more successes than this.
 
 Knobs worth knowing, all in `src/main.ts`:
 
@@ -204,15 +211,24 @@ before the gap between them was a hand-rolled exponential blend standing in for 
 
 ### Grasping
 
-Grasping is currently a kinematic attach: when the gripper closes on a cube, the cube is pinned
-to the jaw and its collision with the arm is switched off for the duration. That exemption is
-needed because a pinned cube and a colliding cube would be two things deciding where the cube is,
-and they would fight.
+Grasping is friction. The fingers are force-limited position motors told to close *narrower* than
+the cube; they stall against it, the unreachable remainder of the command becomes contact force,
+and the cube is held by nothing but friction between two jaw plates. It can therefore slip, be
+knocked aside on approach, or be dropped. Nothing is pinned and no collision is switched off.
 
-The honest consequence is that the grip is not physical. Commanding the jaws shut past the cube's
-width does not stall the fingers against it and squeeze harder, the way a real gripper would — it
-just drives them through, so the closed position is derived from the cube size to keep the two
-consistent. Replacing this with a real friction grasp is the next job.
+The finger motors get a real torque cap — 30 N — because here the cap *is* the grip force, unlike
+the arm joints which get a huge one so they can hold the arm up at all.
+
+Two things this needed that are easy to get wrong:
+
+**A finger's collider is its blade, not the whole finger.** The blade sits entirely on its own
+side of the jaw, but the hinge bracket behind it reaches across the centreline. Hull the whole
+part and you get a wedge that fills the gap — the two fingers' hulls overlap, anything between
+them registers as touching both no matter how wide they are, and closing the jaws shoves the
+object rather than gripping it. The symptom was a cube riding along on fully-open jaws.
+
+**Whether something is gripped is read from contacts**, not from the command. A cube touching
+both blades is held; nothing else counts.
 
 ## System Overview
 
@@ -281,7 +297,8 @@ come back as a single file of the same episodes under `format: "3jsvla.dataset.v
 - [x] Put the robot in a real scene and randomise the backdrop per episode
 - [x] Stack three cubes in an instructed order instead of moving one to a zone
 - [x] Simulate the arm itself, so it has mass, inertia and collision
-- [ ] Replace the kinematic attach with a real friction grasp
+- [x] Replace the kinematic attach with a real friction grasp
+- [ ] Close the loop on the scripted policy so it corrects for the arm lagging its command
 - [ ] Train a small behavior-cloning policy
 - [ ] Connect the policy to the browser environment
 - [ ] Evaluate the complete closed-loop system
