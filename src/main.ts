@@ -3,7 +3,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
-import URDFLoader, { type URDFRobot } from "urdf-loader";
+import URDFLoader, { type URDFLink, type URDFRobot } from "urdf-loader";
 import "./style.css";
 
 type JointValues = Record<string, number>;
@@ -37,7 +37,9 @@ type JointSpec = {
   initial: number;
   unit: "deg" | "percent";
   urdfJoints: string[];
+  /** Slider units to URDF units, and back again for reading the arm's measured pose. */
   toURDF: (value: number) => number;
+  fromURDF: (value: number) => number;
 };
 
 type Vec3 = [number, number, number];
@@ -69,18 +71,23 @@ type RobotSpec = {
     anchor: Vec3;
     /** Half-extents of the graspable pocket around the anchor, in that link's axes. */
     region: Vec3;
-    /** Gripper control percentages that close on / let go of an object. */
-    closeBelow: number;
-    openAbove: number;
+    /**
+     * Jaw opening in metres at control 100, when that is a linear function of the control. Given
+     * it, the closed position is derived from the cube instead of guessed — guessing is exactly
+     * how the fingers ended up 9 mm inside it.
+     */
+    fullOpening?: number;
+    /** Fallback closed position for grippers whose opening is not linear in the control. */
+    closedAt?: number;
   };
   /**
    * Props are scattered into an annulus in front of the base. `min`/`max` are radii in metres
    * and `yaw` a half-angle in radians; the band has to stay inside the arm's top-down grasp
-   * envelope, and be roomy enough for two zones and three cubes to fit without overlapping.
+   * envelope, and be roomy enough for three cubes to sit apart without overlapping.
    */
   reach: { min: number; max: number; yaw: number };
-  /** Prop sizes, scaled to the arm. `cube` must stay under the gripper's jaw opening. */
-  props: { cube: number; zoneInner: number; zoneOuter: number };
+  /** Cube edge length, which must stay under the gripper's jaw opening. */
+  props: { cube: number };
   /**
    * Closed-form IK, when this arm has one. Without it the scripted generator is unavailable
    * and the arm is joint-slider only. `pitch` is how far the tool points below horizontal and
@@ -91,6 +98,7 @@ type RobotSpec = {
 };
 
 const revolute = (value: number) => THREE.MathUtils.degToRad(value);
+const measured = (value: number) => THREE.MathUtils.radToDeg(value);
 
 /**
  * Closed-form IK for the A1Z. J1 takes the azimuth and J2/J3/J4 all turn about Y, so once the
@@ -198,26 +206,24 @@ const A1Z: RobotSpec = {
     gripper_finger_left_link: { color: 0x272b2f, roughness: 0.5, metalness: 0.3 },
     gripper_finger_rIght_link: { color: 0x272b2f, roughness: 0.5, metalness: 0.3 },
   },
-  // The G1Z jaw tips meet at x = 0.183 in the arm_link6 frame and open to 60 mm, so a
-  // 45 mm cube is pinched at 75% of the control range. Grip below 70%, let go above 82%.
+  // The G1Z jaw tips meet at x = 0.183 in the arm_link6 frame and open to 60 mm at control 100.
   grasp: {
     link: "arm_link6",
     anchor: [0.17, 0, 0],
     region: [0.042, 0.032, 0.032],
-    closeBelow: 70,
-    openAbove: 82,
+    fullOpening: A1Z_FINGER_STROKE * 2,
   },
   // A top-down grasp reaches out to 0.47 m at cube height before the ±75° wrist pitch runs out.
   reach: { min: 0.27, max: 0.43, yaw: THREE.MathUtils.degToRad(55) },
-  props: { cube: 0.045, zoneInner: 0.07, zoneOuter: 0.085 },
+  props: { cube: 0.045 },
   solve: solveA1Z,
   joints: [
-    { name: "arm_joint1", label: "J1 base yaw", min: -120, max: 120, initial: 0, unit: "deg", urdfJoints: ["arm_joint1"], toURDF: revolute },
-    { name: "arm_joint2", label: "J2 shoulder", min: 0, max: 180, initial: 100, unit: "deg", urdfJoints: ["arm_joint2"], toURDF: revolute },
-    { name: "arm_joint3", label: "J3 elbow", min: -180, max: 0, initial: -100, unit: "deg", urdfJoints: ["arm_joint3"], toURDF: revolute },
-    { name: "arm_joint4", label: "J4 wrist pitch", min: -75, max: 75, initial: 55, unit: "deg", urdfJoints: ["arm_joint4"], toURDF: revolute },
-    { name: "arm_joint5", label: "J5 wrist yaw", min: -85, max: 85, initial: 0, unit: "deg", urdfJoints: ["arm_joint5"], toURDF: revolute },
-    { name: "arm_joint6", label: "J6 wrist roll", min: -115, max: 115, initial: 0, unit: "deg", urdfJoints: ["arm_joint6"], toURDF: revolute },
+    { name: "arm_joint1", label: "J1 base yaw", min: -120, max: 120, initial: 0, unit: "deg", urdfJoints: ["arm_joint1"], toURDF: revolute, fromURDF: measured },
+    { name: "arm_joint2", label: "J2 shoulder", min: 0, max: 180, initial: 100, unit: "deg", urdfJoints: ["arm_joint2"], toURDF: revolute, fromURDF: measured },
+    { name: "arm_joint3", label: "J3 elbow", min: -180, max: 0, initial: -100, unit: "deg", urdfJoints: ["arm_joint3"], toURDF: revolute, fromURDF: measured },
+    { name: "arm_joint4", label: "J4 wrist pitch", min: -75, max: 75, initial: 55, unit: "deg", urdfJoints: ["arm_joint4"], toURDF: revolute, fromURDF: measured },
+    { name: "arm_joint5", label: "J5 wrist yaw", min: -85, max: 85, initial: 0, unit: "deg", urdfJoints: ["arm_joint5"], toURDF: revolute, fromURDF: measured },
+    { name: "arm_joint6", label: "J6 wrist roll", min: -115, max: 115, initial: 0, unit: "deg", urdfJoints: ["arm_joint6"], toURDF: revolute, fromURDF: measured },
     {
       name: "gripper",
       label: "Gripper",
@@ -227,6 +233,7 @@ const A1Z: RobotSpec = {
       unit: "percent",
       urdfJoints: ["gripper_finger_left_joint", "gripper_finger_rIght_joint"],
       toURDF: (value) => (value / 100) * A1Z_FINGER_STROKE,
+      fromURDF: (value) => (value / A1Z_FINGER_STROKE) * 100,
     },
   ],
 };
@@ -246,21 +253,22 @@ const SO101: RobotSpec = {
     obsTarget: [0, 0.16, 0],
   },
   finish: {}, // the SO-101 URDF already declares per-link colours
+  // The SO-101 jaw swings on a hinge, so its opening is not linear in the control and the closed
+  // position is measured rather than derived.
   grasp: {
     link: "gripper_frame_link",
     anchor: [0, 0, 0],
     region: [0.03, 0.03, 0.03],
-    closeBelow: 22,
-    openAbove: 38,
+    closedAt: 20,
   },
   reach: { min: 0.13, max: 0.26, yaw: THREE.MathUtils.degToRad(55) },
-  props: { cube: 0.025, zoneInner: 0.038, zoneOuter: 0.048 },
+  props: { cube: 0.025 },
   joints: [
-    { name: "shoulder_pan", label: "Shoulder pan", min: -110, max: 110, initial: 0, unit: "deg", urdfJoints: ["shoulder_pan"], toURDF: revolute },
-    { name: "shoulder_lift", label: "Shoulder lift", min: -100, max: 100, initial: -28, unit: "deg", urdfJoints: ["shoulder_lift"], toURDF: revolute },
-    { name: "elbow_flex", label: "Elbow flex", min: -97, max: 97, initial: 62, unit: "deg", urdfJoints: ["elbow_flex"], toURDF: revolute },
-    { name: "wrist_flex", label: "Wrist flex", min: -95, max: 95, initial: -32, unit: "deg", urdfJoints: ["wrist_flex"], toURDF: revolute },
-    { name: "wrist_roll", label: "Wrist roll", min: -157, max: 163, initial: 0, unit: "deg", urdfJoints: ["wrist_roll"], toURDF: revolute },
+    { name: "shoulder_pan", label: "Shoulder pan", min: -110, max: 110, initial: 0, unit: "deg", urdfJoints: ["shoulder_pan"], toURDF: revolute, fromURDF: measured },
+    { name: "shoulder_lift", label: "Shoulder lift", min: -100, max: 100, initial: -28, unit: "deg", urdfJoints: ["shoulder_lift"], toURDF: revolute, fromURDF: measured },
+    { name: "elbow_flex", label: "Elbow flex", min: -97, max: 97, initial: 62, unit: "deg", urdfJoints: ["elbow_flex"], toURDF: revolute, fromURDF: measured },
+    { name: "wrist_flex", label: "Wrist flex", min: -95, max: 95, initial: -32, unit: "deg", urdfJoints: ["wrist_flex"], toURDF: revolute, fromURDF: measured },
+    { name: "wrist_roll", label: "Wrist roll", min: -157, max: 163, initial: 0, unit: "deg", urdfJoints: ["wrist_roll"], toURDF: revolute, fromURDF: measured },
     {
       name: "gripper",
       label: "Gripper",
@@ -270,6 +278,7 @@ const SO101: RobotSpec = {
       unit: "percent",
       urdfJoints: ["gripper"],
       toURDF: (value) => THREE.MathUtils.degToRad(THREE.MathUtils.lerp(-10, 100, value / 100)),
+      fromURDF: (value) => THREE.MathUtils.inverseLerp(-10, 100, THREE.MathUtils.radToDeg(value)) * 100,
     },
   ],
 };
@@ -278,6 +287,18 @@ const ROBOTS = [A1Z, SO101];
 const requestedRobot = new URLSearchParams(window.location.search).get("robot");
 const spec = ROBOTS.find((entry) => entry.id === requestedRobot) ?? A1Z;
 const JOINTS = spec.joints;
+
+/**
+ * Where the jaws sit through a grasp. `GRIPPER_SHUT` is the control value at which the jaws just
+ * meet the cube, minus a hair so the grip reads as firm rather than floating; closing past it
+ * drives the fingers through the cube. Grab and release thresholds bracket it with hysteresis.
+ */
+const GRIPPER_OPEN = 100;
+const GRIPPER_SHUT = spec.grasp.fullOpening
+  ? THREE.MathUtils.clamp((spec.props.cube / spec.grasp.fullOpening) * 100 - 2, 5, 95)
+  : (spec.grasp.closedAt ?? 45);
+const GRIPPER_GRAB_BELOW = GRIPPER_SHUT + 5;
+const GRIPPER_RELEASE_ABOVE = GRIPPER_SHUT + 15;
 
 const CAPTURE_HZ = 5;
 const SAMPLE_INTERVAL = 1000 / CAPTURE_HZ;
@@ -303,29 +324,36 @@ const BACKDROPS = [
   "cabin",
   "comfy_cafe",
 ];
-const PHYSICS_STEP = 1 / 120;
+const PHYSICS_STEP = 1 / 480;
+// Membership and filter bits, so a cube can stop colliding with the arm while it is being held.
+const GROUP_ARM = 0x0001;
+const GROUP_PROP = 0x0002;
+const GROUP_WORLD = 0x0004;
+const collisionGroups = (member: number, collidesWith: number) => (member << 16) | collidesWith;
+const PROP_FREE_GROUPS = collisionGroups(GROUP_PROP, GROUP_ARM | GROUP_PROP | GROUP_WORLD);
+const PROP_HELD_GROUPS = collisionGroups(GROUP_PROP, GROUP_PROP | GROUP_WORLD);
+
 /** What the policy sees. The converter reads these back out of the dump's meta.json. */
 const OBSERVATION_WIDTH = 256;
 const OBSERVATION_HEIGHT = 192;
 
 type PropId = "red" | "green" | "blue";
-type ZoneShape = "circle" | "square";
-
 const PROP_SPECS: Array<{ id: PropId; label: string; color: number }> = [
   { id: "red", label: "red", color: 0xd0472c },
   { id: "green", label: "green", color: 0x4a9257 },
   { id: "blue", label: "blue", color: 0x3a6ba5 },
 ];
 
-// Zones are told apart by shape, not colour, so they never compete with the cube colours.
-const ZONE_SPECS: Array<{ id: ZoneShape; label: string }> = [
-  { id: "circle", label: "circle" },
-  { id: "square", label: "square" },
-];
-
-type Prop = { id: PropId; label: string; color: number; mesh: THREE.Mesh; body: RAPIER.RigidBody };
-type Zone = { id: ZoneShape; label: string; mesh: THREE.Mesh };
-type Task = { object: PropId; target: ZoneShape; instruction: string };
+type Prop = {
+  id: PropId;
+  label: string;
+  color: number;
+  mesh: THREE.Mesh;
+  body: RAPIER.RigidBody;
+  collider: RAPIER.Collider;
+};
+/** Bottom, middle and top of the stack the instruction asks for. */
+type Task = { order: [PropId, PropId, PropId]; instruction: string };
 
 const sceneElement = document.querySelector<HTMLDivElement>("#scene")!;
 const controlsElement = document.querySelector<HTMLDivElement>("#joint-controls")!;
@@ -350,15 +378,24 @@ const episodeCountElement = document.querySelector<HTMLInputElement>("#episode-c
 robotBadgeElement.textContent = `${spec.label} / SIM`;
 
 const initialValues = Object.fromEntries(JOINTS.map((joint) => [joint.name, joint.initial])) as JointValues;
+/** What the arm is told to do. With dynamics on, what it actually does is `measuredValues`. */
 const currentValues = { ...initialValues };
 const targetValues = { ...initialValues };
+const measuredValues = { ...initialValues };
 const sliders = new Map<string, HTMLInputElement>();
 const valueLabels = new Map<string, HTMLElement>();
 
-let task: Task = { object: "red", target: "circle", instruction: "" };
+let task: Task = { order: ["red", "green", "blue"], instruction: "" };
 let frames: EpisodeFrame[] = [];
 let dataset: Array<ReturnType<typeof buildEpisode>> = [];
-let script: { plan: Script; time: number; tick: number } | null = null;
+let script: {
+  plan: Script;
+  time: number;
+  tick: number;
+  /** Which leg of the stack is running, and how much episode time the earlier legs used. */
+  stage: number;
+  clock: number;
+} | null = null;
 let generation: {
   requested: number;
   completed: number;
@@ -500,46 +537,16 @@ const props: Prop[] = PROP_SPECS.map((propSpec) => {
   const body = physics.createRigidBody(
     RAPIER.RigidBodyDesc.dynamic().setLinearDamping(0.35).setAngularDamping(0.55).setCcdEnabled(true),
   );
-  physics.createCollider(
+  const collider = physics.createCollider(
     RAPIER.ColliderDesc.cuboid(spec.props.cube / 2, spec.props.cube / 2, spec.props.cube / 2)
       .setFriction(1.1)
       .setRestitution(0.05)
-      .setDensity(700),
+      .setDensity(700)
+      .setCollisionGroups(PROP_FREE_GROUPS),
     body,
   );
 
-  return { ...propSpec, mesh, body };
-});
-
-/** Zones are markings on the table, not obstacles, so they get no collider. */
-function zoneGeometry(shape: ZoneShape) {
-  const { zoneInner: inner, zoneOuter: outer } = spec.props;
-  if (shape === "circle") return new THREE.RingGeometry(inner, outer, 48);
-  const outline = new THREE.Shape();
-  outline.moveTo(-outer, -outer);
-  outline.lineTo(outer, -outer);
-  outline.lineTo(outer, outer);
-  outline.lineTo(-outer, outer);
-  outline.closePath();
-  const hole = new THREE.Path();
-  hole.moveTo(-inner, -inner);
-  hole.lineTo(-inner, inner);
-  hole.lineTo(inner, inner);
-  hole.lineTo(inner, -inner);
-  hole.closePath();
-  outline.holes.push(hole);
-  return new THREE.ShapeGeometry(outline);
-}
-
-const zones: Zone[] = ZONE_SPECS.map((zoneSpec) => {
-  const mesh = new THREE.Mesh(
-    zoneGeometry(zoneSpec.id),
-    new THREE.MeshBasicMaterial({ color: 0x3a3f45, side: THREE.DoubleSide }),
-  );
-  mesh.rotation.x = -Math.PI / 2;
-  mesh.position.y = 0.001;
-  scene.add(mesh);
-  return { ...zoneSpec, mesh };
+  return { ...propSpec, mesh, body, collider };
 });
 
 // urdf-loader resolves loadAsync as soon as the XML is parsed, while the STL meshes are
@@ -617,6 +624,9 @@ function grabProp(prop: Prop) {
   heldProp = prop;
   heldRotation.copy(jawInverse).multiply(prop.mesh.quaternion);
   prop.body.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true);
+  // The grasp snaps the cube into the jaw, which now has colliders of its own. Without this the
+  // cube and the fingers would be interpenetrating and shove each other apart.
+  prop.collider.setCollisionGroups(PROP_HELD_GROUPS);
   statusElement.textContent = `GRIPPED ${prop.label.toUpperCase()} CUBE`;
 }
 
@@ -626,6 +636,7 @@ function releaseProp(deltaSeconds: number) {
   if (!prop) return;
   heldProp = null;
   setPropDynamic(prop);
+  prop.collider.setCollisionGroups(PROP_FREE_GROUPS);
   scratch.copy(jawPosition).sub(previousJawPosition).divideScalar(Math.max(deltaSeconds, PHYSICS_STEP));
   prop.body.setLinvel(scratch, true);
   prop.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
@@ -648,13 +659,13 @@ function updateGrasp(deltaSeconds: number) {
 
   const opening = currentValues.gripper;
   if (heldProp) {
-    if (opening > spec.grasp.openAbove) {
+    if (opening > GRIPPER_RELEASE_ABOVE) {
       releaseProp(deltaSeconds);
     } else {
       heldProp.body.setNextKinematicTranslation(jawPosition);
       heldProp.body.setNextKinematicRotation(jawRotation.clone().multiply(heldRotation));
     }
-  } else if (opening < spec.grasp.closeBelow) {
+  } else if (opening < GRIPPER_GRAB_BELOW) {
     const candidate = findPropInJaw();
     if (candidate) grabProp(candidate);
   }
@@ -678,6 +689,222 @@ function stepPhysics(deltaSeconds: number) {
     physicsAccumulator -= PHYSICS_STEP;
   }
   syncPropMeshes();
+}
+
+/**
+ * Arm dynamics.
+ *
+ * Until now the arm was kinematic: joint angles were written straight into the URDF tree and the
+ * links had no colliders, so the arm tracked commands perfectly and passed through everything it
+ * was not holding. Here each link becomes a rigid body with the URDF's own mass, joined by
+ * motorised joints, so the arm is driven by torques and has to fight gravity and its own inertia.
+ *
+ * These are *impulse* joints, not Rapier's reduced-coordinate multibody joints, because the JS
+ * bindings expose motors only on the former. That is the known cost: a maximal-coordinate chain
+ * is held together by constraints and can sag under load. `AccelerationBased` motors (whose gains
+ * do not scale with the inertia they are pushing) and a raised solver iteration count are what
+ * keep it tight.
+ */
+/** The link bolted to the desk. Both URDFs here name it the same thing. */
+const ROOT_LINK = "base_link";
+/**
+ * Tuned by sweeping against the settled tracking error at the home pose. The interesting part is
+ * that stiffness alone does almost nothing: at a 1/120 step the shoulder sat 26 degrees low no
+ * matter the gain, because a stiff motor needs a step small enough to integrate it. At 1/480 the
+ * same gain tracks to about a degree. That is why PHYSICS_STEP is 1/480 and not 1/120.
+ */
+let motorStiffness = 5_000_000;
+let motorDamping = 2 * Math.sqrt(5_000_000);
+/** Generous compared to the real arm's 3.5-25 Nm limits: the sim has no gravity-compensation
+ *  controller, so the motors carry the whole load themselves. */
+const MOTOR_MAX_FORCE = 1_000_000;
+/** Cap on hull points per link: the STLs run to tens of thousands of vertices and the hull of a
+ *  dense mesh is unchanged by sampling it. */
+const HULL_POINT_BUDGET = 4000;
+
+
+type ArmJoint = {
+  joint: RAPIER.RevoluteImpulseJoint | RAPIER.PrismaticImpulseJoint;
+  parent: RAPIER.RigidBody;
+  child: RAPIER.RigidBody;
+  axis: THREE.Vector3;
+  anchor: THREE.Vector3;
+  prismatic: boolean;
+};
+
+/**
+ * Link-local vertices of what this link alone draws, thinned to the point budget.
+ *
+ * Note the hand-rolled walk: the URDF tree nests each link under the joint that drives it, so a
+ * plain `traverse` would sweep up every link downstream and hand back a hull enclosing the whole
+ * arm from here on. Descending only until the next joint is what keeps one hull to one link.
+ */
+function linkHullPoints(link: THREE.Object3D) {
+  const toLocal = new THREE.Matrix4().copy(link.matrixWorld).invert();
+  const meshes: THREE.Mesh[] = [];
+  const collect = (object: THREE.Object3D) => {
+    for (const child of object.children) {
+      if ((child as { isURDFJoint?: boolean }).isURDFJoint) continue;
+      if (child instanceof THREE.Mesh) meshes.push(child);
+      collect(child);
+    }
+  };
+  collect(link);
+  const total = meshes.reduce((sum, mesh) => sum + mesh.geometry.attributes.position.count, 0);
+  const stride = Math.max(1, Math.ceil(total / HULL_POINT_BUDGET));
+
+  const points: number[] = [];
+  const vertex = new THREE.Vector3();
+  const toLink = new THREE.Matrix4();
+  for (const mesh of meshes) {
+    toLink.multiplyMatrices(toLocal, mesh.matrixWorld);
+    const attribute = mesh.geometry.attributes.position;
+    for (let index = 0; index < attribute.count; index += stride) {
+      vertex.fromBufferAttribute(attribute, index).applyMatrix4(toLink);
+      points.push(vertex.x, vertex.y, vertex.z);
+    }
+  }
+  return new Float32Array(points);
+}
+
+/**
+ * Builds the articulation, or returns null when this URDF is not one we can do faithfully.
+ * A rotated joint origin (`rpy`) means the parent and child frames disagree about where the axis
+ * points, and getting that wrong silently produces an arm that bends the wrong way — so rather
+ * than half-support it, those robots keep the kinematic path.
+ */
+function buildArmDynamics() {
+  robot.updateMatrixWorld(true);
+
+  const rotated = Object.values(robot.joints).filter(
+    (joint) => joint.jointType !== "fixed" && joint.quaternion.angleTo(IDENTITY) > 1e-6,
+  );
+  if (rotated.length > 0) {
+    statusElement.textContent =
+      `${spec.label} HAS ROTATED JOINT ORIGINS — RUNNING KINEMATIC, NOT DYNAMIC`;
+    return null;
+  }
+
+  const bodies = new Map<string, RAPIER.RigidBody>();
+  const translation = new THREE.Vector3();
+  const rotation = new THREE.Quaternion();
+  const scratchScale = new THREE.Vector3();
+
+  for (const [name, link] of Object.entries(robot.links)) {
+    link.matrixWorld.decompose(translation, rotation, scratchScale);
+    // The base is bolted to the desk; everything above it is free to be pushed around.
+    const isRoot = link === robot.links[ROOT_LINK];
+    const body = physics.createRigidBody(
+      (isRoot ? RAPIER.RigidBodyDesc.fixed() : RAPIER.RigidBodyDesc.dynamic())
+        .setTranslation(translation.x, translation.y, translation.z)
+        .setRotation(rotation)
+        .setLinearDamping(0.4)
+        .setAngularDamping(0.8)
+        .setCanSleep(false),
+    );
+
+    const points = linkHullPoints(link);
+    const desc = points.length >= 12 ? RAPIER.ColliderDesc.convexHull(points) : null;
+    if (desc) {
+      const collider = physics.createCollider(
+        desc.setFriction(0.9).setRestitution(0).setCollisionGroups(collisionGroups(GROUP_ARM, GROUP_PROP | GROUP_WORLD)),
+        body,
+      );
+      // Prefer the URDF's own mass over whatever a density would imply for a hull.
+      const mass = link.inertial?.mass;
+      if (mass && mass > 0) collider.setMass(mass);
+    }
+    bodies.set(name, body);
+  }
+
+  const joints = new Map<string, ArmJoint>();
+  for (const [name, urdfJoint] of Object.entries(robot.joints)) {
+    const prismatic = urdfJoint.jointType === "prismatic";
+    if (!prismatic && urdfJoint.jointType !== "revolute" && urdfJoint.jointType !== "continuous") continue;
+
+    const childLink = urdfJoint.children.find((child) => (child as URDFLink).isURDFLink) as URDFLink | undefined;
+    const parentLink = urdfJoint.parent as URDFLink | null;
+    if (!childLink || !parentLink) continue;
+    const parent = bodies.get(parentLink.urdfName);
+    const child = bodies.get(childLink.urdfName);
+    if (!parent || !child) continue;
+
+    const axis = urdfJoint.axis.clone().normalize();
+    // urdf-loader nests parent link -> joint -> child link, so the joint's own local position is
+    // the anchor in the parent's frame and the child sits at the joint's origin.
+    const anchor = urdfJoint.position.clone();
+    const data = prismatic
+      ? RAPIER.JointData.prismatic(anchor, childLink.position, axis)
+      : RAPIER.JointData.revolute(anchor, childLink.position, axis);
+    data.limitsEnabled = true;
+    data.limits = [urdfJoint.limit.lower, urdfJoint.limit.upper];
+
+    const joint = physics.createImpulseJoint(data, parent, child, true) as
+      | RAPIER.RevoluteImpulseJoint
+      | RAPIER.PrismaticImpulseJoint;
+    joint.configureMotorModel(RAPIER.MotorModel.AccelerationBased);
+    joint.setMotorMaxForce(MOTOR_MAX_FORCE);
+    joints.set(name, { joint, parent, child, axis, anchor, prismatic });
+  }
+
+  physics.numSolverIterations = 16;
+  return joints;
+}
+
+const IDENTITY = new THREE.Quaternion();
+const armJoints = buildArmDynamics();
+
+const parentRotation = new THREE.Quaternion();
+const childRotation = new THREE.Quaternion();
+const relativeRotation = new THREE.Quaternion();
+const relativeOffset = new THREE.Vector3();
+
+/** Reads a joint's actual position back out of the solver, in URDF units. */
+function measureJoint(entry: ArmJoint) {
+  const parentAt = entry.parent.rotation();
+  const childAt = entry.child.rotation();
+  parentRotation.set(parentAt.x, parentAt.y, parentAt.z, parentAt.w);
+  childRotation.set(childAt.x, childAt.y, childAt.z, childAt.w);
+
+  if (entry.prismatic) {
+    const from = entry.parent.translation();
+    const to = entry.child.translation();
+    relativeOffset
+      .set(to.x - from.x, to.y - from.y, to.z - from.z)
+      .applyQuaternion(parentRotation.clone().invert())
+      .sub(entry.anchor);
+    return relativeOffset.dot(entry.axis);
+  }
+
+  relativeRotation.copy(parentRotation).invert().multiply(childRotation);
+  const along =
+    relativeRotation.x * entry.axis.x +
+    relativeRotation.y * entry.axis.y +
+    relativeRotation.z * entry.axis.z;
+  return 2 * Math.atan2(along, relativeRotation.w);
+}
+
+/** Points the motors at a commanded pose. What the arm actually does is up to the solver. */
+function commandArm(values: JointValues) {
+  if (!armJoints) return;
+  for (const control of JOINTS) {
+    const target = control.toURDF(values[control.name]);
+    for (const name of control.urdfJoints) {
+      armJoints.get(name)?.joint.configureMotorPosition(target, motorStiffness, motorDamping);
+    }
+  }
+}
+
+/** Copies the solved arm pose back into the URDF tree, and into the state we record. */
+function syncArmFromPhysics() {
+  if (!armJoints) return;
+  for (const [name, entry] of armJoints) {
+    robot.setJointValue(name, measureJoint(entry));
+  }
+  for (const control of JOINTS) {
+    const entry = armJoints.get(control.urdfJoints[0]);
+    if (entry) measuredValues[control.name] = control.fromURDF(measureJoint(entry));
+  }
 }
 
 function setURDFJoint(robotModel: URDFRobot, joint: JointSpec, value: number) {
@@ -720,9 +947,18 @@ function formatJointValue(name: string, value: number) {
   return joint.unit === "percent" ? `${Math.round(value)}%` : `${Math.round(value)}°`;
 }
 
+/**
+ * Drives the arm to a commanded pose. With dynamics the motors are aimed and the solver decides
+ * what actually happens; without it the angles are written straight into the URDF tree.
+ */
 function setRobotPose(values: JointValues) {
+  if (armJoints) {
+    commandArm(values);
+    return;
+  }
   for (const joint of JOINTS) {
     setURDFJoint(robot, joint, values[joint.name]);
+    measuredValues[joint.name] = values[joint.name];
   }
 }
 
@@ -779,7 +1015,7 @@ function captureFrame(seconds: number) {
     timestamp: Number(seconds.toFixed(3)),
     observation: {
       image,
-      joint_positions: cloneJointValues(currentValues),
+      joint_positions: cloneJointValues(measuredValues),
       object_poses: props.map((prop) => ({
         id: prop.id,
         position: prop.mesh.position.toArray().map(round4) as [number, number, number],
@@ -832,10 +1068,10 @@ function updateReplay(now: number) {
 
 function buildEpisode() {
   return {
-    format: "3jsvla.episode.v1",
+    format: "3jsvla.episode.v2",
     robot: spec.id,
     instruction: instructionElement.value.trim(),
-    task: { object: task.object, target: task.target },
+    task: { order: task.order },
     capture_hz: CAPTURE_HZ,
     success: taskSucceeded(),
     created_at: new Date().toISOString(),
@@ -872,22 +1108,24 @@ function downloadDataset() {
   statusElement.textContent = `DATASET DOWNLOADED — ${dataset.length} EPISODES`;
 }
 
-function pick<T>(items: T[]) {
-  return items[Math.floor(Math.random() * items.length)];
-}
-
 /**
- * The instruction has to be the only thing that says which cube and which zone, otherwise the
- * policy can score perfectly while ignoring the language entirely. Three cubes and two zones
- * give six distinct tasks that share the same visual scene.
+ * A random ordering of the three cubes into a stack. The instruction is the only thing that says
+ * which cube goes where, and the order matters — build it wrong and the stack is wrong even
+ * though every cube was moved. Six permutations share the same visual scene, so a policy that
+ * ignores the language cannot do better than chance.
  */
 function rollTask(): Task {
-  const object = pick(PROP_SPECS);
-  const target = pick(ZONE_SPECS);
+  const shuffled = [...PROP_SPECS];
+  for (let i = shuffled.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  const [base, middle, top] = shuffled;
   return {
-    object: object.id,
-    target: target.id,
-    instruction: `Move the ${object.label} cube to the ${target.label}.`,
+    order: [base.id, middle.id, top.id],
+    instruction:
+      `Stack the ${middle.label} cube on the ${base.label} cube, ` +
+      `then put the ${top.label} cube on top.`,
   };
 }
 
@@ -895,10 +1133,9 @@ function rollTask(): Task {
 type Placement = { at: THREE.Vector2; clearance: number };
 
 /**
- * Samples a spot in the arm's reachable annulus that clears everything placed so far. Each
- * item carries its own clearance so zones (which are wide) keep their distance from each
- * other while cubes (which are small) can sit closer together. Returns null rather than
- * falling back to a fixed spot, so a cramped layout is retried instead of silently stacking.
+ * Samples a spot in the arm's reachable annulus that clears everything placed so far. Returns
+ * null rather than falling back to a fixed spot, so a cramped layout is retried instead of
+ * silently overlapping.
  */
 function samplePlacement(taken: Placement[], clearance: number) {
   const { min, max, yaw } = spec.reach;
@@ -916,13 +1153,16 @@ function samplePlacement(taken: Placement[], clearance: number) {
   return null;
 }
 
-/** Two zone spots then three cube spots, or null if this attempt boxed itself in. */
+/**
+ * One spot per cube, or null if this attempt boxed itself in. They are kept a good way apart:
+ * the arm carries a cube kinematically, and a cube passing close over another one would shove
+ * it, so the stack has room around it.
+ */
 function sampleLayout() {
-  const zoneClearance = spec.props.zoneOuter + 0.01;
-  const cubeClearance = spec.props.cube;
+  const clearance = spec.props.cube * 2.2;
   const taken: Placement[] = [];
-  for (let index = 0; index < zones.length + props.length; index += 1) {
-    const placement = samplePlacement(taken, index < zones.length ? zoneClearance : cubeClearance);
+  for (let index = 0; index < props.length; index += 1) {
+    const placement = samplePlacement(taken, clearance);
     if (!placement) return null;
     taken.push(placement);
   }
@@ -944,11 +1184,8 @@ function newEpisode() {
   }
 
   const spots = layout.map((placement) => placement.at);
-  zones.forEach((zone, index) => {
-    zone.mesh.position.set(spots[index].x, 0.001, spots[index].y);
-  });
   props.forEach((prop, index) => {
-    const spot = spots[zones.length + index];
+    const spot = spots[index];
     prop.body.setTranslation({ x: spot.x, y: spec.props.cube / 2, z: spot.y }, true);
     prop.body.setRotation(
       new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.random() * Math.PI * 2),
@@ -977,25 +1214,28 @@ function newEpisode() {
 }
 
 /**
- * The task counts as done when the named cube is at rest inside the named zone and no longer
- * held. This is the success signal an evaluation run would score against.
+ * Done when the three cubes are stacked in the order the instruction named, at rest and nothing
+ * held. Physics decides this, not a region test: each cube has to actually be sitting at its
+ * level and lined up over the base, so a knocked-over or badly aimed stack simply fails.
  */
 function taskSucceeded() {
-  const prop = props.find((entry) => entry.id === task.object)!;
-  const zone = zones.find((entry) => entry.id === task.target)!;
-  if (heldProp === prop) return false;
-  if (Math.abs(prop.mesh.position.y - spec.props.cube / 2) > 0.02) return false;
-  const velocity = prop.body.linvel();
-  if (Math.hypot(velocity.x, velocity.y, velocity.z) > 0.03) return false;
-  return (
-    Math.hypot(prop.mesh.position.x - zone.mesh.position.x, prop.mesh.position.z - zone.mesh.position.z) <=
-    spec.props.zoneInner
-  );
+  if (heldProp) return false;
+  const cube = spec.props.cube;
+  const stack = task.order.map((id) => props.find((entry) => entry.id === id)!);
+  const base = stack[0].mesh.position;
+
+  return stack.every((prop, level) => {
+    const at = prop.mesh.position;
+    if (Math.abs(at.y - (level + 0.5) * cube) > cube * 0.35) return false;
+    if (Math.hypot(at.x - base.x, at.z - base.z) > cube * 0.6) return false;
+    const velocity = prop.body.linvel();
+    return Math.hypot(velocity.x, velocity.y, velocity.z) <= 0.03;
+  });
 }
 
 function updateTaskState() {
   const done = taskSucceeded();
-  taskStateElement.textContent = done ? "IN ZONE" : "NOT PLACED";
+  taskStateElement.textContent = done ? "Stacked" : "Not stacked";
   taskStateElement.classList.toggle("is-success", done);
 }
 
@@ -1005,10 +1245,8 @@ type Script = { steps: ScriptStep[]; start: JointValues; total: number };
 
 // Demonstration speed, not the arm's limit. At 5 Hz capture this puts roughly 12 degrees
 // between consecutive actions; raise CAPTURE_HZ if a policy needs finer steps than that.
-const ARM_SPEED = 60; // deg/s
-const GRIPPER_SPEED = 120; // percent/s
-const GRIPPER_OPEN = 100;
-const GRIPPER_SHUT = 45;
+const ARM_SPEED = 28; // deg/s
+const GRIPPER_SPEED = 90; // percent/s
 
 function stepDuration(from: JointValues, to: JointValues) {
   let seconds = 0.2;
@@ -1025,55 +1263,75 @@ function stepDuration(from: JointValues, to: JointValues) {
  * few millimetres of aim jitter and the angle the cube is set down at, so a batch is a spread of
  * demonstrations rather than one trajectory repeated. Returns null when the IK cannot reach.
  */
-function buildScript(): Script | null {
+/** An episode is two of these: middle cube onto the base, then top cube onto the pair. */
+const STACK_STAGES = 2;
+
+/**
+ * Waypoints for one leg: fetch `sourceId` and set it down centred on the base cube at `level`
+ * (1 sits on the base, 2 sits on the pair). Positions are read live from the physics bodies, so
+ * planning the second leg after the first has landed absorbs whatever the base drifted.
+ *
+ * Every leg re-rolls the approach pitch, hover height and a little aim error, so a batch is a
+ * spread of demonstrations rather than one motion repeated. Placement jitter is deliberately far
+ * tighter than the pick jitter: a few millimetres off and the stack topples, which is the whole
+ * difference between this task and dropping a cube in a wide zone.
+ */
+function buildStage(sourceId: PropId, level: number): Script | null {
   if (!spec.solve) return null;
-  const prop = props.find((entry) => entry.id === task.object)!;
-  const zone = zones.find((entry) => entry.id === task.target)!;
+  const source = props.find((entry) => entry.id === sourceId)!;
+  const base = props.find((entry) => entry.id === task.order[0])!;
+  const cube = spec.props.cube;
 
-  const hover = THREE.MathUtils.lerp(0.07, 0.13, Math.random());
-  /** Aim error, so a batch is not one motion repeated. Widen it to breed failures into the set. */
   const jitter = (spread: number) => (Math.random() - 0.5) * spread;
-  const resting = spec.props.cube / 2;
+  const sourceAt = source.body.translation();
+  const baseAt = base.body.translation();
+  const sourceYaw = new THREE.Euler().setFromQuaternion(source.mesh.quaternion, "YXZ").y;
+  const baseYaw = new THREE.Euler().setFromQuaternion(base.mesh.quaternion, "YXZ").y;
 
-  const cubePose = prop.body.translation();
-  const cubeYaw = new THREE.Euler().setFromQuaternion(prop.mesh.quaternion, "YXZ").y;
-  const placeYaw = Math.random() * Math.PI;
-
-  const grasp = new THREE.Vector3(cubePose.x + jitter(0.008), resting, cubePose.z + jitter(0.008));
-  const above = grasp.clone().setY(resting + hover);
-  const overZone = new THREE.Vector3(
-    zone.mesh.position.x + jitter(0.04),
-    resting + hover,
-    zone.mesh.position.z + jitter(0.04),
+  const grasp = new THREE.Vector3(sourceAt.x + jitter(0.008), cube / 2, sourceAt.z + jitter(0.008));
+  const place = new THREE.Vector3(
+    baseAt.x + jitter(0.005),
+    (level + 0.5) * cube + THREE.MathUtils.lerp(0.003, 0.010, Math.random()),
+    baseAt.z + jitter(0.005),
   );
-  const drop = overZone.clone().setY(resting + THREE.MathUtils.lerp(0.008, 0.04, Math.random()));
 
-  // Height costs pitch: straight down the jaw only clears 57 mm at the far edge of the
-  // workspace, but 199 mm at 70°. So prefer a vertical grasp and tilt only as much as the
-  // reach demands, sweeping down from a random steep start until every waypoint solves.
+  // Height costs pitch: straight down the jaw only clears 57 mm at the far edge of the workspace
+  // but 199 mm at 70 degrees, and carrying over a growing stack needs real height. So prefer a
+  // vertical grasp and give up pitch, then hover, only as far as the reach demands.
   const firstPitch = THREE.MathUtils.lerp(82, 90, Math.random());
+  const firstHover = THREE.MathUtils.lerp(0.075, 0.12, Math.random());
+
   const plan = ((): Array<{ pose: JointValues; hold?: number }> | null => {
-    for (let pitchDeg = firstPitch; pitchDeg >= 60; pitchDeg -= 4) {
-      const pitch = revolute(pitchDeg);
-      const at = (point: THREE.Vector3, azimuth: number, gripper: number) => {
-        const solution = spec.solve!(spec.mount, point, pitch, azimuth);
-        return solution ? { ...solution, gripper } : null;
-      };
-      // hold: repeat a pose so the attach registers, and so a dropped cube lands before the cut
-      const attempt: Array<{ pose: JointValues | null; hold?: number }> = [
-        { pose: at(above, cubeYaw, GRIPPER_OPEN) },
-        { pose: at(grasp, cubeYaw, GRIPPER_OPEN) },
-        { pose: at(grasp, cubeYaw, GRIPPER_SHUT) },
-        { pose: at(grasp, cubeYaw, GRIPPER_SHUT), hold: 0.3 },
-        { pose: at(above, cubeYaw, GRIPPER_SHUT) },
-        { pose: at(overZone, placeYaw, GRIPPER_SHUT) },
-        { pose: at(drop, placeYaw, GRIPPER_SHUT) },
-        { pose: at(drop, placeYaw, GRIPPER_OPEN) },
-        { pose: at(drop, placeYaw, GRIPPER_OPEN), hold: 0.45 },
-        { pose: at(overZone, placeYaw, GRIPPER_OPEN) },
-      ];
-      if (attempt.every((entry) => entry.pose !== null)) {
-        return attempt as Array<{ pose: JointValues; hold?: number }>;
+    for (let hover = firstHover; hover >= 0.05; hover -= 0.015) {
+      // The carried cube is a kinematic body and will shove anything it clips, so the transit
+      // height has to clear the stack that is already there, not just the cube being picked up.
+      const transit = level * cube + hover;
+      const overSource = grasp.clone().setY(Math.max(cube / 2 + hover, transit));
+      const overPlace = place.clone().setY(transit + cube / 2);
+
+      for (let pitchDeg = firstPitch; pitchDeg >= 58; pitchDeg -= 4) {
+        const pitch = revolute(pitchDeg);
+        const at = (point: THREE.Vector3, azimuth: number, gripper: number) => {
+          const solution = spec.solve!(spec.mount, point, pitch, azimuth);
+          return solution ? { ...solution, gripper } : null;
+        };
+        // hold: repeat a pose so the attach registers, and so a placed cube settles before the cut
+        const attempt: Array<{ pose: JointValues | null; hold?: number }> = [
+          { pose: at(overSource, sourceYaw, GRIPPER_OPEN) },
+          { pose: at(grasp, sourceYaw, GRIPPER_OPEN) },
+          { pose: at(grasp, sourceYaw, GRIPPER_SHUT) },
+          { pose: at(grasp, sourceYaw, GRIPPER_SHUT), hold: 0.7 },
+          { pose: at(overSource, sourceYaw, GRIPPER_SHUT) },
+          { pose: at(overPlace, baseYaw, GRIPPER_SHUT) },
+          { pose: at(place, baseYaw, GRIPPER_SHUT) },
+          { pose: at(place, baseYaw, GRIPPER_SHUT), hold: 0.7 },
+          { pose: at(place, baseYaw, GRIPPER_OPEN) },
+          { pose: at(place, baseYaw, GRIPPER_OPEN), hold: 0.7 },
+          { pose: at(overPlace, baseYaw, GRIPPER_OPEN) },
+        ];
+        if (attempt.every((entry) => entry.pose !== null)) {
+          return attempt as Array<{ pose: JointValues; hold?: number }>;
+        }
       }
     }
     return null;
@@ -1212,9 +1470,11 @@ const GENERATION_BUDGET_MS = 8;
 function startGeneratedEpisode() {
   for (let attempt = 0; attempt < 8; attempt += 1) {
     newEpisode();
-    const plan = buildScript();
-    if (plan) {
-      script = { plan, time: 0, tick: 0 };
+    const plan = buildStage(task.order[1], 1);
+    // Check the second leg is reachable too before committing to the layout — the stack sits
+    // where the base already is, so it can be planned now even though it is re-planned later.
+    if (plan && buildStage(task.order[2], 2)) {
+      script = { plan, time: 0, tick: 0, stage: 0, clock: 0 };
       return true;
     }
   }
@@ -1231,13 +1491,23 @@ function advanceScript() {
   Object.assign(targetValues, poseAt(plan, Math.min(script.time + 1 / CAPTURE_HZ, plan.total)));
 
   setRobotPose(currentValues);
-  updateGrasp(GENERATION_DT);
   stepPhysics(GENERATION_DT);
+  syncArmFromPhysics();
+  updateGrasp(GENERATION_DT);
 
-  if (script.tick % TICKS_PER_CAPTURE === 0) captureFrame(script.time);
+  if (script.tick % TICKS_PER_CAPTURE === 0) captureFrame(script.clock + script.time);
   script.tick += 1;
   script.time += GENERATION_DT;
-  return script.time < plan.total;
+  if (script.time < plan.total) return true;
+
+  // Leg finished. Plan the next one from where the world actually ended up, so any drift in the
+  // base cube while the first cube landed on it is taken into account rather than assumed away.
+  const stage = script.stage + 1;
+  if (stage >= STACK_STAGES) return false;
+  const next = buildStage(task.order[stage + 1], stage + 1);
+  if (!next) return false; // unreachable from here: end the episode, it will score as a failure
+  script = { plan: next, time: 0, tick: script.tick, stage, clock: script.clock + plan.total };
+  return true;
 }
 
 function setGenerationControls(running: boolean) {
@@ -1364,7 +1634,9 @@ function animate(now: number) {
     if (replaying) {
       updateReplay(now);
     } else {
-      const blend = 1 - Math.exp(-9 * deltaSeconds);
+      // Sliders command the motors directly. The lag between command and pose used to be a
+      // hand-rolled exponential blend; it now comes from the arm's own inertia.
+      const blend = armJoints ? 1 : 1 - Math.exp(-9 * deltaSeconds);
       for (const joint of JOINTS) {
         currentValues[joint.name] = THREE.MathUtils.lerp(
           currentValues[joint.name],
@@ -1374,8 +1646,9 @@ function animate(now: number) {
       }
     }
     setRobotPose(currentValues);
-    updateGrasp(deltaSeconds);
     stepPhysics(deltaSeconds);
+    syncArmFromPhysics();
+    updateGrasp(deltaSeconds);
   }
   updateTaskState();
   orbitControls.update();

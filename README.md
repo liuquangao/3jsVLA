@@ -1,5 +1,7 @@
 # 3jsVLA
 
+![The collector: a Galaxea A1Z on a desk, three cubes to stack, a randomised room behind](docs/scene.jpg)
+
 3jsVLA is a minimal Vision-Language-Action (VLA) project for learning how a VLA system works from end to end.
 
 The goal is to let users build each part step by step:
@@ -13,8 +15,7 @@ The goal is to let users build each part step by step:
 The first working component is a browser-based data collector built with Three.js and Rapier. It
 loads the official Galaxea (星海图) A1Z URDF with the G1Z parallel gripper, using the vendor's own
 STL meshes and joint names (`arm_joint1` … `arm_joint6`), stands it on an office desk in a room,
-and puts it in front of three coloured cubes and two target zones it can actually pick up and put
-down.
+and puts it in front of three coloured cubes it can actually pick up and stack.
 
 ## Run the Collector
 
@@ -40,21 +41,30 @@ third arm means adding a `RobotSpec`, not editing the collector.
 
 ## The Task
 
-Move a named cube to a named zone. Three cubes (red, green, blue) and two zones (a circle and a
-square) give six distinct tasks that all share the same scene, and every episode re-scatters the
-cubes and zones and re-rolls the instruction:
+Stack three cubes in the order the instruction names. There are no target markings on the desk —
+the cubes *are* the targets:
 
 ```text
-Instruction: "Move the green cube to the square."
+Instruction: "Stack the green cube on the blue cube, then put the red cube on top."
 Observation: RGB image + robot state
 Action:      Six joint targets + gripper target
-Success:     named cube at rest inside the named zone, no longer held
+Success:     the three cubes at rest, stacked in that order, nothing in the gripper
 ```
 
-The point of three cubes and two zones is that **the instruction has to be read**. With a single
-cube and a single target, a policy scores perfectly while ignoring the language entirely, and
-nothing in the training curves tells you the language channel is dead. Here the same image maps
-to different actions depending on the sentence.
+Three cubes give six orderings, and every episode re-scatters them and re-rolls the instruction.
+The point is that **the instruction has to be read**, and read as a sequence: moving both cubes
+but stacking them the wrong way round is a failure. With one cube and one target, a policy scores
+perfectly while ignoring the language entirely, and nothing in the training curves says the
+channel is dead.
+
+Success is decided by physics rather than a region test. A cube has to actually be sitting at its
+level and lined up over the base, so a stack that topples, or a cube placed a few millimetres off
+that slides away, simply fails. Failed episodes are kept — `tools/to_lerobot.py --success-only`
+filters them out at training time, and they are worth having for anything else.
+
+This is what the policy sees, at 256 x 192:
+
+![A single observation frame](docs/observation.jpg)
 
 ## Generating Data
 
@@ -62,14 +72,12 @@ Demonstrations are scripted, not teleoperated. Dragging seven sliders produces t
 move one joint at a time, and a policy trained on those learns slider-wiggling rather than
 reaching — so the collector drives itself instead.
 
-Each episode: reach over the named cube, drop onto it, close, lift, carry to the named zone,
-lower, let go. Every episode re-rolls the layout, the instruction, the approach pitch, the hover
-and drop heights, a few millimetres of aim error on the grasp, up to 4 cm on where in the zone it
-aims, and the angle the cube is set down at — so a batch is a spread of demonstrations rather than
-one motion repeated.
-
-On this machine it runs at roughly **one episode per second of wall time**, 100% success, giving
-4–7 second episodes of 21–37 frames each.
+Each episode is two legs: fetch the middle cube and set it on the base, then fetch the top cube
+and set it on the pair. The second leg is planned only once the first has landed, from where the
+world actually ended up, so any drift in the base cube while a cube settled onto it is taken into
+account rather than assumed away. Every leg re-rolls the approach pitch, the hover height and a
+little aim error — placement jitter far tighter than pick jitter, because a few millimetres off
+and the stack topples.
 
 Pressing Generate asks for a folder and streams episodes into it as they finish, so memory stays
 flat however many you ask for. Browsers without the File System Access API (Firefox, Safari) fall
@@ -77,15 +85,22 @@ back to collecting in memory and handing the lot over as one JSON download.
 
 Generation is driven from the animation loop in ~8 ms slices, so the page keeps rendering and you
 can watch it collect. That also means it needs a **foreground tab** — a backgrounded tab stops
-getting animation frames and generation stalls until you come back.
+getting animation frames and generation stalls until you come back. Episodes run on a fixed
+simulated clock rather than wall time, so the dataset comes out the same however fast the machine
+is, and a stalled tab cannot stretch a trajectory.
 
-Three knobs worth knowing, all constants in `src/main.ts`:
+Expect a substantial share of episodes to fail. Stacking is decided by physics, and now that the
+arm is simulated too it no longer lands exactly where the script commands it. That is the point of
+keeping failures rather than tuning them away.
+
+Knobs worth knowing, all in `src/main.ts`:
 
 | Knob | Does what |
 | --- | --- |
-| `ARM_SPEED` | Demonstration speed. At 60 deg/s and 5 Hz capture there are ~12° between consecutive actions. |
-| `CAPTURE_HZ` | Raise it if a policy needs finer action steps than that. |
-| `jitter(...)` in `buildScript` | Aim error. Widen it to breed failures into the dataset; right now essentially every episode succeeds. |
+| `ARM_SPEED` | Demonstration speed. Slower gives the arm time to converge before the gripper acts. |
+| `CAPTURE_HZ` | Raise it if a policy needs finer action steps. |
+| `jitter(...)` in `buildStage` | Aim error. Widen it to breed more failures into the dataset. |
+| `motorStiffness` / `PHYSICS_STEP` | How tightly the arm tracks its command. They are coupled — see Physics. |
 
 ## Getting the Data Out
 
@@ -166,28 +181,38 @@ into it.
 
 ## Physics
 
-Rapier simulates the props only. The cubes are dynamic rigid bodies with box colliders, the table
-is a static box, and objects fall, topple, slide, collide with each other and roll out of a zone
-if you drop them badly — all of which lands in the dataset as failure modes a policy can learn to
-recover from.
+Rapier simulates the props **and the arm**. The cubes are dynamic rigid bodies with box
+colliders, the desk is a static box, and every arm link is a rigid body carrying its own mass
+from the URDF, joined by motorised joints and wearing a convex hull built from its visual mesh.
+So the arm has to fight gravity and its own inertia, it cannot pass through the desk, and it
+shoves cubes it blunders into.
 
-The arm stays kinematic: it is driven straight from the joint controls and carries no colliders.
-That keeps the recorded actions clean and avoids the soft, drooping serial chain that an impulse
-solver gives you for a force-driven arm. Grasping is a kinematic attach for the same reason — the
-cube snaps to the jaw when the gripper closes on it, which never jitters and makes the pickup
-moment obvious. Releasing hands the cube back to the physics world carrying the jaw's velocity.
+Two things are worth knowing about how it is put together, because both cost real time to find.
 
-The trade-off is that the arm is infinitely stiff and passes through anything it is not gripping.
-Giving the links colliders is the natural next step if that starts to matter.
+**The joints are impulse joints, not Rapier's reduced-coordinate multibody joints.** The JS
+bindings expose motors only on the former. A maximal-coordinate chain is held together by
+constraints and is softer than a reduced-coordinate one, which is the trade being made here.
 
-The first version will use:
+**A stiff motor needs a small timestep.** With a 1/120 step, the shoulder sat 26 degrees below its
+command no matter the gain — raising stiffness by 1000x barely moved it, which looks for all the
+world like a broken motor. At 1/480 the same gain tracks to about a degree. That is why
+`PHYSICS_STEP` is 1/480, and it costs four times the physics work per frame.
 
-- One robot arm
-- One RGB camera
-- A small tabletop scene
-- A few movable objects
-- Behavior cloning
-- Task success rate for evaluation
+Because the arm is driven rather than posed, `observation.joint_positions` is now what the arm
+*achieved* and `action.joint_targets` what it was *told* — a genuine state-action pair, where
+before the gap between them was a hand-rolled exponential blend standing in for inertia.
+
+### Grasping
+
+Grasping is currently a kinematic attach: when the gripper closes on a cube, the cube is pinned
+to the jaw and its collision with the arm is switched off for the duration. That exemption is
+needed because a pinned cube and a colliding cube would be two things deciding where the cube is,
+and they would fight.
+
+The honest consequence is that the grip is not physical. Commanding the jaws shut past the cube's
+width does not stall the fingers against it and squeeze harder, the way a real gripper would — it
+just drives them through, so the closed position is derived from the cube size to keep the two
+consistent. Replacing this with a real friction grasp is the next job.
 
 ## System Overview
 
@@ -213,7 +238,7 @@ Three.js provides the scene, camera, rendering, and browser interface. Simple ki
 │   ├── models/desk/             # the desk, glTF
 │   └── hdri/                    # ten indoor panoramas, one per episode
 ├── src/
-│   ├── main.ts     # Robot table, scene, physics, task sampling, controls, recorder
+│   ├── main.ts     # Robot table, scene, physics, arm dynamics, task, recorder
 │   └── style.css   # Collector interface
 ├── index.html
 └── package.json
@@ -222,29 +247,27 @@ Three.js provides the scene, camera, rendering, and browser interface. Simple ki
 Each downloaded episode is a JSON file containing:
 
 ```text
-instruction: "Move the green cube to the square."
+instruction: "Stack the green cube on the blue cube, then put the red cube on top."
 robot: "a1z"
-task: { object: "green", target: "square" }
+task: { order: ["blue", "green", "red"] }   # base, middle, top
 capture_hz: 5
 success: true
 frames[]
 ├── timestamp
-├── observation.image             # 256 x 192 JPEG data URL
-├── observation.joint_positions  # where the arm is
-├── observation.object_poses     # ground truth, for debugging and scoring
-├── observation.grasped          # which cube is in the gripper, or null
-└── action.joint_targets         # where the arm was told to go
+├── observation.image_path        # frames/000000.jpg, or an inline data URL in the single-file form
+├── observation.joint_positions   # where the arm actually is
+├── observation.object_poses      # ground truth, for debugging and scoring
+├── observation.grasped           # which cube is in the gripper, or null
+└── action.joint_targets          # where the arm was told to go
 ```
 
-`joint_positions` is the state and `joint_targets` is the action. In a generated episode the
-action is the commanded pose one capture interval ahead — what a policy would have to emit at
-that frame to produce the motion that follows.
+`joint_positions` is the state and `joint_targets` is the action, and with the arm simulated they
+genuinely differ: the state is what the arm achieved, the action what it was commanded. In a
+generated episode the action is the command one capture interval ahead — what a policy would have
+to emit at that frame to produce the motion that follows.
 
 Generated episodes go to a folder as the tree above, or — where the browser cannot write to one —
 come back as a single file of the same episodes under `format: "3jsvla.dataset.v1"`.
-
-Generated episodes run on a fixed simulated clock rather than wall time, so the dataset comes out
-the same however fast the machine is, and a stalled tab cannot stretch a trajectory.
 
 ## Roadmap
 
@@ -256,6 +279,9 @@ the same however fast the machine is, and a stalled tab cannot stretch a traject
 - [x] Closed-form IK and a scripted policy that generates episodes on its own
 - [x] Stream episodes to disk and convert them to LeRobotDataset v3.0
 - [x] Put the robot in a real scene and randomise the backdrop per episode
+- [x] Stack three cubes in an instructed order instead of moving one to a zone
+- [x] Simulate the arm itself, so it has mass, inertia and collision
+- [ ] Replace the kinematic attach with a real friction grasp
 - [ ] Train a small behavior-cloning policy
 - [ ] Connect the policy to the browser environment
 - [ ] Evaluate the complete closed-loop system
