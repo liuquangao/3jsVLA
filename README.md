@@ -1,6 +1,6 @@
-# NanoVLA
+# 3jsVLA
 
-NanoVLA is a minimal Vision-Language-Action (VLA) project for learning how a VLA system works from end to end.
+3jsVLA is a minimal Vision-Language-Action (VLA) project for learning how a VLA system works from end to end.
 
 The goal is to let users build each part step by step:
 
