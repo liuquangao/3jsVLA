@@ -1,6 +1,8 @@
 import RAPIER from "@dimforge/rapier3d-compat";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
 import URDFLoader, { type URDFRobot } from "urdf-loader";
 import "./style.css";
 
@@ -173,12 +175,14 @@ const A1Z: RobotSpec = {
   urdf: "/assets/robots/a1z/A1Z_G1Z.urdf",
   packages: { A1Z_G1Z: "/assets/robots/a1z" },
   mount: [-0.36, 0.001, 0],
+  // Framed low enough that the backdrop reads as a room rather than just its floor, while the
+  // observation still fills with the reachable patch of desk.
   view: {
-    camera: [1.16, 0.88, 1.16],
-    target: [0, 0.26, 0],
-    distance: [0.9, 4],
-    obsCamera: [0.94, 0.72, 0.94],
-    obsTarget: [-0.06, 0.18, 0],
+    camera: [1.28, 0.82, 1.28],
+    target: [-0.14, 0.05, 0],
+    distance: [0.9, 5],
+    obsCamera: [0.98, 0.62, 0.98],
+    obsTarget: [-0.16, 0.05, 0],
   },
   // The vendor URDF paints all nine links the same SolidWorks default grey, so the arm
   // arrives colourless. These are read off Galaxea's own product render: black anodised
@@ -278,8 +282,27 @@ const JOINTS = spec.joints;
 const CAPTURE_HZ = 5;
 const SAMPLE_INTERVAL = 1000 / CAPTURE_HZ;
 
-/** Work surface is the top of this box, at y = 0. */
-const TABLE = { width: 1.18, thickness: 0.07, depth: 0.82 };
+/**
+ * The desk model is Y-up and stands on the floor with its work surface at y = 0.7875, so it is
+ * dropped by exactly that to put the surface on our y = 0 work plane. Width and depth come from
+ * the glTF bounding box; the collider is built from the same numbers so the visible top and the
+ * one the cubes rest on cannot drift apart.
+ */
+const DESK = { top: 0.7875, width: 2.0, depth: 0.9472 };
+
+/** Swapped per episode so the policy cannot use the backdrop as a position cue. */
+const BACKDROPS = [
+  "small_empty_room_1",
+  "small_empty_room_2",
+  "small_empty_room_3",
+  "small_empty_room_4",
+  "pine_attic",
+  "reading_room",
+  "wooden_lounge",
+  "en_suite",
+  "cabin",
+  "comfy_cafe",
+];
 const PHYSICS_STEP = 1 / 120;
 /** What the policy sees. The converter reads these back out of the dump's meta.json. */
 const OBSERVATION_WIDTH = 256;
@@ -351,8 +374,6 @@ let replayStart = 0;
 let replayIndex = 0;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color("#cbc5b8");
-scene.fog = new THREE.Fog("#cbc5b8", 2.8, 6);
 
 const camera = new THREE.PerspectiveCamera(38, 1, 0.01, 20);
 camera.position.set(...spec.view.camera);
@@ -383,10 +404,12 @@ observationRenderer.outputColorSpace = THREE.SRGBColorSpace;
 observationRenderer.toneMapping = THREE.ACESFilmicToneMapping;
 observationRenderer.toneMappingExposure = 1.05;
 
-const hemiLight = new THREE.HemisphereLight(0xfff8e7, 0x5d6259, 2.2);
+// The environment map now carries the ambient, so the fill light is only a gentle lift and the
+// key light is kept mainly for a crisp contact shadow.
+const hemiLight = new THREE.HemisphereLight(0xfff8e7, 0x5d6259, 0.35);
 scene.add(hemiLight);
 
-const keyLight = new THREE.DirectionalLight(0xfff2d8, 3.6);
+const keyLight = new THREE.DirectionalLight(0xfff2d8, 1.9);
 keyLight.position.set(1.2, 2, 0.8);
 keyLight.castShadow = true;
 keyLight.shadow.mapSize.set(1024, 1024);
@@ -396,25 +419,50 @@ keyLight.shadow.camera.top = 1.9;
 keyLight.shadow.camera.bottom = -1.9;
 scene.add(keyLight);
 
-const tableMaterial = new THREE.MeshStandardMaterial({ color: 0xd7c8ac, roughness: 0.86 });
-const tableTop = new THREE.Mesh(
-  new THREE.BoxGeometry(TABLE.width, TABLE.thickness, TABLE.depth),
-  tableMaterial,
-);
-tableTop.position.y = -TABLE.thickness / 2;
-tableTop.receiveShadow = true;
-scene.add(tableTop);
-
-for (const x of [-0.51, 0.51]) {
-  for (const z of [-0.33, 0.33]) {
-    const leg = new THREE.Mesh(
-      new THREE.BoxGeometry(0.055, 0.58, 0.055),
-      new THREE.MeshStandardMaterial({ color: 0x262723, roughness: 0.75 }),
-    );
-    leg.position.set(x, -0.32, z);
-    leg.castShadow = true;
-    scene.add(leg);
+/**
+ * Everything below is awaited before anything renders, for the same reason the URDF meshes are:
+ * the first observation frame is captured immediately, and a missing desk or backdrop in it would
+ * be a silent hole in the dataset.
+ */
+const gltf = await new GLTFLoader().loadAsync("/assets/models/desk/metal_office_desk.gltf");
+const desk = gltf.scene;
+desk.position.y = -DESK.top;
+desk.traverse((object) => {
+  if (object instanceof THREE.Mesh) {
+    object.castShadow = true;
+    object.receiveShadow = true;
   }
+});
+scene.add(desk);
+
+// Catches the desk's shadow without painting over the backdrop behind it.
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(12, 12), new THREE.ShadowMaterial({ opacity: 0.32 }));
+floor.rotation.x = -Math.PI / 2;
+floor.position.y = -DESK.top;
+floor.receiveShadow = true;
+scene.add(floor);
+
+/**
+ * One equirectangular panorama per backdrop, used as both the visible background and the light
+ * source. Loading all of them up front costs a slower start but keeps `newEpisode` synchronous,
+ * which matters because generation runs on a fixed simulated clock and cannot await anything.
+ */
+const pmrem = new THREE.PMREMGenerator(renderer);
+pmrem.compileEquirectangularShader();
+const rgbeLoader = new RGBELoader();
+
+const backdrops = await Promise.all(
+  BACKDROPS.map(async (name) => {
+    const texture = await rgbeLoader.loadAsync(`/assets/hdri/${name}.hdr`);
+    texture.mapping = THREE.EquirectangularReflectionMapping;
+    return { name, background: texture, environment: pmrem.fromEquirectangular(texture).texture };
+  }),
+);
+
+function useBackdrop(index: number) {
+  const backdrop = backdrops[index];
+  scene.background = backdrop.background;
+  scene.environment = backdrop.environment;
 }
 
 // Physics runs for the props only. The arm stays kinematic — it is driven straight from the
@@ -426,15 +474,16 @@ const physics = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
 physics.timestep = PHYSICS_STEP;
 physics.numSolverIterations = 8;
 
-// The table collider matches the visual box exactly, so the work surface really is y = 0.
+// A slab whose top face sits exactly on y = 0. A box is the right collider for a flat desktop —
+// the drawers and legs below it are never touched, so they need no geometry.
 physics.createCollider(
-  RAPIER.ColliderDesc.cuboid(TABLE.width / 2, TABLE.thickness / 2, TABLE.depth / 2)
-    .setTranslation(0, -TABLE.thickness / 2, 0)
+  RAPIER.ColliderDesc.cuboid(DESK.width / 2, 0.05, DESK.depth / 2)
+    .setTranslation(0, -0.05, 0)
     .setFriction(0.9),
 );
-// Floor, so a cube knocked off the table lands somewhere instead of falling forever.
+// Floor, so a cube knocked off the desk lands somewhere instead of falling forever.
 physics.createCollider(
-  RAPIER.ColliderDesc.cuboid(3, 0.05, 3).setTranslation(0, -0.66, 0).setFriction(0.9),
+  RAPIER.ColliderDesc.cuboid(6, 0.05, 6).setTranslation(0, -DESK.top - 0.05, 0).setFriction(0.9),
 );
 
 const cubeGeometry = new THREE.BoxGeometry(spec.props.cube, spec.props.cube, spec.props.cube);
@@ -910,6 +959,10 @@ function newEpisode() {
   });
 
   syncPropMeshes();
+  // A fixed backdrop is a shortcut: the same wall in the same place is a free position cue, and
+  // a policy will happily use it instead of looking at the cubes. Re-rolling it per episode
+  // forces the visual encoder onto the desk and the props.
+  useBackdrop(Math.floor(Math.random() * backdrops.length));
   task = rollTask();
   instructionElement.value = task.instruction;
   frames = [];
@@ -917,6 +970,9 @@ function newEpisode() {
   downloadButton.disabled = true;
   updateStats(0);
   resetPose();
+  // Refresh the preview so it shows the scene you are actually looking at. Skipped while
+  // generating, where the episode's own first capture lands a frame a moment later anyway.
+  if (!generation) previewElement.src = renderObservation();
   statusElement.textContent = "NEW TASK — adjust a joint, then start recording";
 }
 
@@ -1333,6 +1389,7 @@ function animate(now: number) {
 
 buildJointControls();
 resizeRenderer();
+useBackdrop(0);
 newEpisode();
 stepPhysics(PHYSICS_STEP);
 previewElement.src = renderObservation();

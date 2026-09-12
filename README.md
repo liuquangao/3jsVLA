@@ -12,8 +12,9 @@ The goal is to let users build each part step by step:
 
 The first working component is a browser-based data collector built with Three.js and Rapier. It
 loads the official Galaxea (星海图) A1Z URDF with the G1Z parallel gripper, using the vendor's own
-STL meshes and joint names (`arm_joint1` … `arm_joint6`), and puts it in front of three coloured
-cubes and two target zones that it can actually pick up and put down.
+STL meshes and joint names (`arm_joint1` … `arm_joint6`), stands it on an office desk in a room,
+and puts it in front of three coloured cubes and two target zones it can actually pick up and put
+down.
 
 ## Run the Collector
 
@@ -147,6 +148,22 @@ grasp cannot lift its approach very high. The script therefore prefers a vertica
 only as far as the reach demands, sweeping the pitch down from a steep start until every waypoint
 solves.
 
+## The Scene
+
+The desk is a real model rather than a textured box, and the room behind it is an equirectangular
+panorama used twice over: as the visible background, and — through a PMREM pass — as the scene's
+light source, so the arm picks up the colour and direction of whichever room it is standing in.
+
+**The backdrop is re-rolled every episode.** That is not decoration. A fixed background is a
+shortcut: the same wall in the same place is a free position cue, and a visual policy will use it
+instead of looking at the cubes. Training curves will not warn you — the policy scores well right
+up until the background moves. Ten panoramas ship in `public/assets/hdri/`; add or remove one by
+dropping in a `.hdr` and editing `BACKDROPS` in `src/main.ts`.
+
+The desk's work surface is at y = 0 in world terms, and its physics collider is built from the
+same numbers as its visual placement. If those drift apart, cubes float above the desktop or sink
+into it.
+
 ## Physics
 
 Rapier simulates the props only. The cubes are dynamic rigid bodies with box colliders, the table
@@ -190,9 +207,11 @@ NanoVLA/
 ├── tools/
 │   ├── to_lerobot.py            # dump -> LeRobotDataset v3.0
 │   └── requirements.txt
-├── public/assets/robots/
-│   ├── a1z/                     # Galaxea A1Z + G1Z URDF and STL meshes
-│   └── so101/                   # SO-101 URDF and STL meshes
+├── public/assets/
+│   ├── robots/a1z/              # Galaxea A1Z + G1Z URDF and STL meshes
+│   ├── robots/so101/            # SO-101 URDF and STL meshes
+│   ├── models/desk/             # the desk, glTF
+│   └── hdri/                    # ten indoor panoramas, one per episode
 ├── src/
 │   ├── main.ts     # Robot table, scene, physics, task sampling, controls, recorder
 │   └── style.css   # Collector interface
@@ -236,6 +255,7 @@ the same however fast the machine is, and a stalled tab cannot stretch a traject
 - [x] Randomise the scene and make the instruction disambiguating
 - [x] Closed-form IK and a scripted policy that generates episodes on its own
 - [x] Stream episodes to disk and convert them to LeRobotDataset v3.0
+- [x] Put the robot in a real scene and randomise the backdrop per episode
 - [ ] Train a small behavior-cloning policy
 - [ ] Connect the policy to the browser environment
 - [ ] Evaluate the complete closed-loop system
