@@ -10,7 +10,6 @@
   --muted: #757369;
   --line: #b8b2a7;
   --signal: #ec542f;
-  --yellow: #e6bb42;
 }
 
 * {
@@ -171,13 +170,64 @@ button {
 
 .axis-mark {
   position: absolute;
-  bottom: 28px;
+  bottom: 210px;
   left: 28px;
   width: 52px;
   height: 52px;
   border-bottom: 1px solid var(--ink);
   border-left: 1px solid var(--ink);
   font: 9px "DM Mono", monospace;
+}
+
+.camera-dock {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  left: 14px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  max-width: 390px;
+  margin: 0 auto;
+}
+
+.camera-tile {
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--ink);
+  background: var(--paper);
+  cursor: pointer;
+  text-align: left;
+}
+
+.camera-tile canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 4 / 3;
+  background: #cbc5b8;
+}
+
+.camera-tile > span {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 8px 6px;
+  font: 9px "DM Mono", monospace;
+}
+
+.camera-tile small { color: #347348; font-size: 8px; }
+.camera-tile[aria-pressed="true"] { border-color: var(--signal); box-shadow: 0 0 0 2px var(--signal); }
+.camera-orbit { padding: 0; border: 0; background: transparent; font: inherit; cursor: pointer; }
+.camera-orbit[aria-pressed="true"] { color: #b3371b; }
+.camera-tile:focus-visible, .camera-orbit:focus-visible { outline: 2px solid var(--signal); outline-offset: 3px; }
+
+@media (max-width: 480px) {
+  .camera-dock { right: 8px; bottom: 8px; left: 8px; gap: 5px; }
+  .camera-tile > span { padding: 6px 3px; font-size: 8px; }
+  .camera-tile small { display: none; }
+  .stage-label { gap: 8px; font-size: 8px; }
+  .axis-mark { display: none; }
 }
 
 .axis-mark::after {

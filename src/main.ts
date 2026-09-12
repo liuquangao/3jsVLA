@@ -54,6 +54,8 @@ type RobotSpec = {
   packages: Record<string, string>;
   /** Where the URDF base_link sits on the table, in scene coordinates. */
   mount: Vec3;
+  /** World Y rotation applied to the robot and its reachable workspace. */
+  heading?: number;
   view: {
     camera: Vec3;
     target: Vec3;
@@ -178,15 +180,18 @@ const A1Z: RobotSpec = {
   label: "A1Z + G1Z",
   urdf: "/assets/robots/a1z/A1Z_G1Z.urdf",
   packages: { A1Z_G1Z: "/assets/robots/a1z" },
-  mount: [-0.36, 0.001, 0],
+  // Mounted along the long table edge, facing +Z into the desktop.
+  // Base extends 37.5 mm towards the edge; leave its outer face 3 mm inside the desktop.
+  mount: [0.20, 0.001, -0.4331],
+  heading: -Math.PI / 2,
   // Framed low enough that the backdrop reads as a room rather than just its floor, while the
   // observation still fills with the reachable patch of desk.
   view: {
-    camera: [1.28, 0.82, 1.28],
-    target: [-0.14, 0.05, 0],
+    camera: [1.15, 1.15, 1.55],
+    target: [0.10, 0.12, 0],
     distance: [0.9, 5],
-    obsCamera: [0.98, 0.62, 0.98],
-    obsTarget: [-0.16, 0.05, 0],
+    obsCamera: [0.95, 0.72, 0.85],
+    obsTarget: [0.10, 0.05, -0.05],
   },
   // The vendor URDF paints all nine links the same SolidWorks default grey, so the arm
   // arrives colourless. These are read off Galaxea's own product render: black anodised
@@ -207,7 +212,11 @@ const A1Z: RobotSpec = {
   // A top-down grasp reaches out to 0.47 m at cube height before the ±75° wrist pitch runs out.
   reach: { min: 0.27, max: 0.43, yaw: THREE.MathUtils.degToRad(55) },
   props: { cube: 0.045 },
-  solve: solveA1Z,
+  solve: (mount, target, pitch, jawAzimuth) => {
+    const localTarget = target.clone().sub(new THREE.Vector3(...mount))
+      .applyAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2);
+    return solveA1Z([0, 0, 0], localTarget, pitch, jawAzimuth + Math.PI / 2);
+  },
   joints: [
     { name: "arm_joint1", label: "J1 base yaw", min: -120, max: 120, initial: 0, unit: "deg", urdfJoints: ["arm_joint1"], toURDF: revolute, fromURDF: measured },
     { name: "arm_joint2", label: "J2 shoulder", min: 0, max: 180, initial: 100, unit: "deg", urdfJoints: ["arm_joint2"], toURDF: revolute, fromURDF: measured },
@@ -309,9 +318,15 @@ const BACKDROPS = [
   "en_suite",
   "cabin",
   "comfy_cafe",
+  "abandoned_factory_canteen_01",
+  "forest_slope",
+  "industrial_sunset",
+  "moonless_golf",
+  "studio_small_09",
+  "venice_sunset",
 ];
 const PHYSICS_STEP = 1 / 480;
-// Membership and filter bits, so a cube can stop colliding with the arm while it is being held.
+// Collision membership and filters for the arm, props and world.
 const GROUP_ARM = 0x0001;
 const GROUP_PROP = 0x0002;
 const GROUP_WORLD = 0x0004;
@@ -404,6 +419,7 @@ camera.lookAt(...spec.view.target);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
@@ -422,19 +438,27 @@ observationCamera.lookAt(...spec.view.obsTarget);
 
 const observationRenderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
 observationRenderer.setSize(OBSERVATION_WIDTH, OBSERVATION_HEIGHT, false);
+observationRenderer.shadowMap.enabled = true;
+observationRenderer.shadowMap.type = THREE.PCFShadowMap;
 observationRenderer.outputColorSpace = THREE.SRGBColorSpace;
 observationRenderer.toneMapping = THREE.ACESFilmicToneMapping;
 observationRenderer.toneMappingExposure = 1.05;
 
-// The environment map now carries the ambient, so the fill light is only a gentle lift and the
-// key light is kept mainly for a crisp contact shadow.
-const hemiLight = new THREE.HemisphereLight(0xfff8e7, 0x5d6259, 0.35);
+// Let the HDR supply the lighting colour. Neutral, low-intensity fill/key lights retain
+// shadow definition without imposing the same warm cast on every environment.
+scene.environmentIntensity = 1.2;
+const hemiLight = new THREE.HemisphereLight(0xffffff, 0x808080, 0.08);
 scene.add(hemiLight);
 
-const keyLight = new THREE.DirectionalLight(0xfff2d8, 1.9);
+const keyLight = new THREE.DirectionalLight(0xffffff, 0.45);
 keyLight.position.set(1.2, 2, 0.8);
 keyLight.castShadow = true;
-keyLight.shadow.mapSize.set(1024, 1024);
+keyLight.shadow.mapSize.set(2048, 2048);
+// Metre-scale scene: avoid quantized self-shadow bands on the broad desktop.
+keyLight.shadow.camera.near = 0.1;
+keyLight.shadow.camera.far = 8;
+keyLight.shadow.bias = -0.0001;
+keyLight.shadow.normalBias = 0.002;
 keyLight.shadow.camera.left = -1.9;
 keyLight.shadow.camera.right = 1.9;
 keyLight.shadow.camera.top = 1.9;
@@ -471,13 +495,22 @@ scene.add(floor);
  */
 const pmrem = new THREE.PMREMGenerator(renderer);
 pmrem.compileEquirectangularShader();
+// Render-target textures belong to their WebGL context. The preview renderer needs its own
+// prefiltered environment; sharing the main renderer's GPU texture loses indirect lighting.
+const observationPmrem = new THREE.PMREMGenerator(observationRenderer);
+observationPmrem.compileEquirectangularShader();
+let observationEnvironment: THREE.Texture | null = null;
 const rgbeLoader = new RGBELoader();
 
 const backdrops = await Promise.all(
   BACKDROPS.map(async (name) => {
     const texture = await rgbeLoader.loadAsync(`/assets/hdri/${name}.hdr`);
     texture.mapping = THREE.EquirectangularReflectionMapping;
-    return { name, background: texture, environment: pmrem.fromEquirectangular(texture).texture };
+    return {
+      background: texture,
+      environment: pmrem.fromEquirectangular(texture).texture,
+      observationEnvironment: observationPmrem.fromEquirectangular(texture).texture,
+    };
   }),
 );
 
@@ -485,12 +518,20 @@ function useBackdrop(index: number) {
   const backdrop = backdrops[index];
   scene.background = backdrop.background;
   scene.environment = backdrop.environment;
+  observationEnvironment = backdrop.observationEnvironment;
 }
 
-// Physics runs for the props only. The arm stays kinematic — it is driven straight from the
-// joint controls and has no colliders — which keeps the recorded actions clean and dodges the
-// soft, drooping serial chain that an impulse solver gives you for a force-driven arm. Grasping
-// is a kinematic attach for the same reason: it never jitters and the pickup moment is legible.
+function renderObservationView(view: THREE.Camera) {
+  const mainEnvironment = scene.environment;
+  try {
+    scene.environment = observationEnvironment;
+    observationRenderer.render(scene, view);
+  } finally {
+    scene.environment = mainEnvironment;
+  }
+}
+
+// The arm and props share a dynamic world. Grasping uses jaw contact friction.
 await RAPIER.init();
 const physics = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
 physics.timestep = PHYSICS_STEP;
@@ -553,6 +594,7 @@ statusElement.textContent = `LOADING ${spec.label} URDF`;
 const robot = await urdfLoader.loadAsync(spec.urdf);
 await meshesLoaded;
 robot.rotation.x = -Math.PI / 2;
+robot.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), spec.heading ?? 0));
 robot.position.set(...spec.mount);
 /**
  * urdf-loader builds every visual as a MeshPhongMaterial, which reads flat and washed out
@@ -638,7 +680,7 @@ function syncPropMeshes() {
 function stepPhysics(deltaSeconds: number) {
   physicsAccumulator = Math.min(physicsAccumulator + deltaSeconds, 0.1);
   while (physicsAccumulator >= PHYSICS_STEP) {
-    // Rapier clears accumulated forces after every step, so this belongs inside the loop.
+    // Recompute compensation at each fixed physics step, not at render frequency.
     applyGravityCompensation();
     physics.step();
     physicsAccumulator -= PHYSICS_STEP;
@@ -654,37 +696,24 @@ function stepPhysics(deltaSeconds: number) {
  * was not holding. Here each link becomes a rigid body with the URDF's own mass, joined by
  * motorised joints, so the arm is driven by torques and has to fight gravity and its own inertia.
  *
- * These are *impulse* joints, not Rapier's reduced-coordinate multibody joints, because the JS
- * bindings expose motors only on the former. That is the known cost: a maximal-coordinate chain
- * is held together by constraints and can sag under load. `AccelerationBased` motors (whose gains
- * do not scale with the inertia they are pushing) and a raised solver iteration count are what
- * keep it tight.
+ * Impulse joints form a maximal-coordinate chain and need enough solver iterations to keep
+ * the lightweight wrist/shoulder bodies constrained under motor and gravity loads. Force-based
+ * motors use separate joint gains and the effort limits declared by this asset's URDF.
  */
 /** The link bolted to the desk. Both URDFs here name it the same thing. */
 const ROOT_LINK = "base_link";
 /**
- * A semi-implicit integrator goes unstable somewhere around stiffness * dt^2 = 1, which at a
- * 1/480 step puts the ceiling near 230000. This ran at 5e6 for a while — twenty times over —
- * which tracked to a degree but left the arm buzzing at 2.5-4.3 rad/s while "holding still" and
- * ringing for seconds after every move. It was that high only to mask gravity droop, which
- * applyGravityCompensation now removes at the source.
- *
- * Measured, with the compensation in place: at 150000 (inside the stable band) the arm is quiet
- * and its steady-state error is about a degree, but it is too soft to follow the scripted
- * trajectory — the peak lag reached 80 degrees and the task nearly stopped working. This is the
- * compromise that follows the script while staying four times below where it was.
+ * Simulation-tuned force-based PD gains, in Nm/rad and Nm s/rad. The official A1Z SDK uses
+ * [30,30,30,20,5,5] / [1,1,1,0.5,0.5,0.5] on hardware; its gains are a reference, not a
+ * drop-in match for this constraint solver. See tools/check-arm-stability.mjs for hold checks.
+ * https://github.com/userguide-galaxea/GALAXEA-A1Z
  */
-let motorStiffness = 1_200_000;
-/**
- * About ten times "critical", found by sweeping the step response. Critical damping in the
- * textbook sense is badly underdamped here, because the ringing lives in the compliance of the
- * joint constraints between links rather than in the joint's own degree of freedom, and the motor
- * only sees the latter. Higher still stops the ringing but leaves the arm crawling to its target.
- */
-let motorDamping = 6_000;
-/** Generous compared to the real arm's 3.5-25 Nm limits: the sim has no gravity-compensation
- *  controller, so the motors carry the whole load themselves. */
-const MOTOR_MAX_FORCE = 1_000_000;
+const ARM_MOTOR_GAINS: Record<string, [number, number]> = {
+  arm_joint1: [80, 4], arm_joint2: [200, 12], arm_joint3: [150, 8],
+  arm_joint4: [60, 3], arm_joint5: [15, 1], arm_joint6: [15, 1],
+};
+// Force-based units: N/m and N s/m. Grip force remains capped separately.
+const GRIPPER_MOTOR_GAINS: [number, number] = [6_000, 40];
 /**
  * The finger motors get a real limit instead, because here the cap *is* the grip force. A 45 mm
  * cube at 700 kg/m3 weighs 0.63 N, and two jaw plates at a combined friction of about 1.0 hold
@@ -696,6 +725,7 @@ const GRIP_FORCE = 30;
 const fingerColliders: RAPIER.Collider[] = [];
 /** Every body in the arm, so accumulated torques can be cleared before each step. */
 const armBodies: RAPIER.RigidBody[] = [];
+const armLinkBodies = new Map<string, RAPIER.RigidBody>();
 /** Cap on hull points per link: the STLs run to tens of thousands of vertices and the hull of a
  *  dense mesh is unchanged by sampling it. */
 const HULL_POINT_BUDGET = 4000;
@@ -708,6 +738,8 @@ type ArmJoint = {
   axis: THREE.Vector3;
   anchor: THREE.Vector3;
   prismatic: boolean;
+  gains: [number, number];
+  maxEffort: number;
   /** Every body this joint carries — its child and everything beyond it. */
   load: RAPIER.RigidBody[];
 };
@@ -748,12 +780,48 @@ function linkHullPoints(link: THREE.Object3D, fromX = -Infinity) {
   return new Float32Array(points);
 }
 
-/**
- * Builds the articulation, or returns null when this URDF is not one we can do faithfully.
- * A rotated joint origin (`rpy`) means the parent and child frames disagree about where the axis
- * points, and getting that wrong silently produces an arm that bends the wrong way — so rather
- * than half-support it, those robots keep the kinematic path.
- */
+/** Diagonalize the symmetric URDF inertia tensor into Rapier's principal-axis form. */
+function linkMassProperties(link: URDFLink) {
+  const { mass, origin, inertia: i } = link.inertial;
+  const a = [[i.ixx, i.ixy, i.ixz], [i.ixy, i.iyy, i.iyz], [i.ixz, i.iyz, i.izz]];
+  const v = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  for (let iteration = 0; iteration < 32; iteration += 1) {
+    let p = 0, q = 1;
+    for (const [row, col] of [[0, 2], [1, 2]]) {
+      if (Math.abs(a[row][col]) > Math.abs(a[p][q])) { p = row; q = col; }
+    }
+    if (Math.abs(a[p][q]) < 1e-12) break;
+    const angle = 0.5 * Math.atan2(2 * a[p][q], a[q][q] - a[p][p]);
+    const c = Math.cos(angle), s = Math.sin(angle);
+    const app = a[p][p], aqq = a[q][q], apq = a[p][q];
+    a[p][p] = c * c * app - 2 * s * c * apq + s * s * aqq;
+    a[q][q] = s * s * app + 2 * s * c * apq + c * c * aqq;
+    a[p][q] = a[q][p] = 0;
+    for (let k = 0; k < 3; k += 1) {
+      if (k !== p && k !== q) {
+        const akp = a[k][p], akq = a[k][q];
+        a[k][p] = a[p][k] = c * akp - s * akq;
+        a[k][q] = a[q][k] = s * akp + c * akq;
+      }
+      const vkp = v[k][p], vkq = v[k][q];
+      v[k][p] = c * vkp - s * vkq;
+      v[k][q] = s * vkp + c * vkq;
+    }
+  }
+  const principal = new THREE.Vector3(a[0][0], a[1][1], a[2][2]);
+  if (!(mass > 0) || ![principal.x, principal.y, principal.z].every((x) => Number.isFinite(x) && x > 0)) {
+    throw new Error(`Invalid inertia for ${link.urdfName}`);
+  }
+  const basis = new THREE.Matrix4().set(
+    ...[...v[0], 0, ...v[1], 0, ...v[2], 0, 0, 0, 0, 1] as Parameters<THREE.Matrix4["set"]>,
+  );
+  const [roll, pitch, yaw] = origin.rpy;
+  const frame = new THREE.Quaternion().setFromEuler(new THREE.Euler(roll, pitch, yaw, "ZYX"))
+    .multiply(new THREE.Quaternion().setFromRotationMatrix(basis)).normalize();
+  return { mass, center: new THREE.Vector3().fromArray(origin.xyz), principal, frame };
+}
+
+/** Rotated joint origins retain the existing kinematic fallback. Build at URDF zero pose. */
 function buildArmDynamics() {
   robot.updateMatrixWorld(true);
 
@@ -804,11 +872,15 @@ function buildArmDynamics() {
         desc.setFriction(0.9).setRestitution(0).setCollisionGroups(collisionGroups(GROUP_ARM, GROUP_PROP | GROUP_WORLD)),
         body,
       );
-      // Prefer the URDF's own mass over whatever a density would imply for a hull.
-      const mass = link.inertial?.mass;
-      if (mass && mass > 0) collider.setMass(mass);
+      if (link.inertial?.mass > 0) collider.setDensity(0);
+    }
+    if (link.inertial?.mass > 0) {
+      const { mass, center, principal, frame } = linkMassProperties(link);
+      body.setAdditionalMassProperties(mass, center, principal, frame, false);
+      body.recomputeMassPropertiesFromColliders();
     }
     bodies.set(name, body);
+    armLinkBodies.set(name, body);
     armBodies.push(body);
   }
 
@@ -837,9 +909,11 @@ function buildArmDynamics() {
     const joint = physics.createImpulseJoint(data, parent, child, true) as
       | RAPIER.RevoluteImpulseJoint
       | RAPIER.PrismaticImpulseJoint;
-    joint.configureMotorModel(RAPIER.MotorModel.AccelerationBased);
+    joint.configureMotorModel(RAPIER.MotorModel.ForceBased);
     // The only prismatic joints on these arms are the gripper fingers.
-    joint.setMotorMaxForce(prismatic ? GRIP_FORCE : MOTOR_MAX_FORCE);
+    const maxEffort = prismatic ? GRIP_FORCE : urdfJoint.limit.effort;
+    if (!(maxEffort > 0)) throw new Error(`Missing effort limit for ${name}`);
+    joint.setMotorMaxForce(maxEffort);
     if (prismatic) {
       for (let index = 0; index < child.numColliders(); index += 1) {
         fingerColliders.push(child.collider(index));
@@ -859,10 +933,13 @@ function buildArmDynamics() {
     };
     gather(childLink);
 
-    joints.set(name, { joint, parent, child, axis, anchor, prismatic, load });
+    const gains = prismatic ? GRIPPER_MOTOR_GAINS : (ARM_MOTOR_GAINS[name] ?? [30, 1]);
+    joints.set(name, { joint, parent, child, axis, anchor, prismatic, load, gains, maxEffort });
   }
 
-  physics.numSolverIterations = 16;
+  // This light-link serial chain needs more iterations than independent props. The headless
+  // regression checks both residual oscillation and target error, not merely finite positions.
+  physics.numSolverIterations = 256;
   return joints;
 }
 
@@ -885,17 +962,11 @@ const bodyRotation = new THREE.Quaternion();
 /**
  * Gravity compensation.
  *
- * Without it the motors have to invent the torque that holds the arm against its own weight, and
- * on this chain they cannot do it at any stable gain: a stiffness low enough to integrate at this
- * timestep leaves the shoulder tens of degrees low, and one high enough to stand up buzzes,
- * because the stability ceiling is about 1/dt^2. Both were measured, and there was no setting
- * that was neither soft nor shaking.
- *
- * So the weight is cancelled directly instead. For each joint, sum the gravity torque of every
+ * For each joint, sum the gravity torque of every
  * body it carries about its own axis and apply the opposite as an actuator torque pair — equal
  * and opposite on child and parent, which is what a real joint does. The motors are then only
- * correcting the residual, which modest and stable gains handle. This is what a real arm's
- * controller does too.
+ * correcting the residual. The combined compensation and motor torque stay within the URDF
+ * effort limit. This is a static feed-forward model, not full inverse dynamics.
  */
 function applyGravityCompensation() {
   if (!armJoints) return;
@@ -922,7 +993,10 @@ function applyGravityCompensation() {
       along += lever.cross(weight).dot(axisWorld);
     }
 
-    torque.copy(axisWorld).multiplyScalar(-along);
+    const compensation = THREE.MathUtils.clamp(-along, -entry.maxEffort, entry.maxEffort);
+    // Reserve torque headroom for the feed-forward compensation applied below.
+    entry.joint.setMotorMaxForce(Math.max(0, entry.maxEffort - Math.abs(compensation)));
+    torque.copy(axisWorld).multiplyScalar(compensation);
     entry.child.addTorque(torque, false);
     torque.negate();
     entry.parent.addTorque(torque, false);
@@ -960,7 +1034,12 @@ function commandArm(values: JointValues) {
   for (const control of JOINTS) {
     const target = control.toURDF(values[control.name]);
     for (const name of control.urdfJoints) {
-      armJoints.get(name)?.joint.configureMotorPosition(target, motorStiffness, motorDamping);
+      const entry = armJoints.get(name);
+      entry?.joint.configureMotorPosition(
+        target,
+        entry.gains[0],
+        entry.gains[1],
+      );
     }
   }
 }
@@ -982,6 +1061,28 @@ function setURDFJoint(robotModel: URDFRobot, joint: JointSpec, value: number) {
   for (const urdfJoint of joint.urdfJoints) {
     robotModel.setJointValue(urdfJoint, urdfValue);
   }
+}
+
+/** Reset both worlds together; do not accelerate the arm from its old pose at episode start. */
+function resetArmPhysics(values: JointValues) {
+  for (const control of JOINTS) setURDFJoint(robot, control, values[control.name]);
+  robot.updateMatrixWorld(true);
+  const position = new THREE.Vector3();
+  const rotation = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+  for (const [name, body] of armLinkBodies) {
+    robot.links[name].matrixWorld.decompose(position, rotation, scale);
+    body.setTranslation(position, true);
+    body.setRotation(rotation, true);
+    body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    body.resetForces(false);
+    body.resetTorques(false);
+  }
+  physicsAccumulator = 0;
+  gripped = grippedReport = null;
+  Object.assign(measuredValues, values);
+  commandArm(values);
 }
 
 function buildJointControls() {
@@ -1060,6 +1161,119 @@ function startRecording() {
   updateStats(0);
 }
 
+type SensorView = "wrist" | "overhead";
+let activeView: SensorView | "orbit" = "orbit";
+const sensorCameras = new Map<SensorView, THREE.PerspectiveCamera>();
+const sensorCanvases = new Map<SensorView, HTMLCanvasElement>();
+const cameraButtons = document.querySelectorAll<HTMLButtonElement>("[data-camera]");
+let lastSensorPreview = -Infinity;
+
+/** Visual mounts are added after building physics, so they do not alter link hulls/inertia. */
+function setupSensorCameras() {
+  const create = (id: SensorView, parent: THREE.Object3D, position: Vec3, target: Vec3, fov: number) => {
+    const sensor = new THREE.PerspectiveCamera(fov, 4 / 3, 0.005, 20);
+    sensor.position.set(...position);
+    // Wrist frame: +X is forward, Y is the jaw opening, +Z is image-up.
+    // Keep the two fingers horizontal in the image instead of rolling the view by 90 degrees.
+    if (id === "wrist") sensor.up.set(0, 0, 1);
+    // Orient in the mounting link's coordinates before parenting the camera.
+    sensor.lookAt(new THREE.Vector3(...target));
+    parent.add(sensor);
+    sensorCameras.set(id, sensor);
+    const canvas = document.querySelector<HTMLCanvasElement>(`#camera-${id}`)!;
+    canvas.width = OBSERVATION_WIDTH;
+    canvas.height = OBSERVATION_HEIGHT;
+    sensorCanvases.set(id, canvas);
+
+    const housing = new THREE.Group();
+    housing.position.copy(sensor.position);
+    housing.quaternion.copy(sensor.quaternion);
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.036, 0.026, 0.024),
+      new THREE.MeshStandardMaterial({ color: 0x20262a, roughness: 0.5 }));
+    body.position.z = 0.018;
+    const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.008, 16),
+      new THREE.MeshStandardMaterial({ color: 0x56b7bd, metalness: 0.6, roughness: 0.2 }));
+    lens.rotation.x = Math.PI / 2;
+    lens.position.z = 0.005;
+    housing.add(body, lens);
+    parent.add(housing);
+    if (id === "overhead") {
+      // Table-mounted stand, behind the camera so it stays out of the forward view.
+      const stand = new THREE.Group();
+      stand.name = "center-camera-stand";
+      const metal = new THREE.MeshStandardMaterial({ color: 0x30383d, metalness: 0.65, roughness: 0.38 });
+      const rubber = new THREE.MeshStandardMaterial({ color: 0x171b1d, roughness: 0.9 });
+      const poleX = position[0] - 0.035;
+      const standX = spec.heading ? position[0] : poleX;
+      const standZ = position[2] - (spec.heading ? 0.035 : 0);
+      const addPart = (geometry: THREE.BufferGeometry, material: THREE.Material, at: THREE.Vector3) => {
+        const part = new THREE.Mesh(geometry, material);
+        part.position.copy(at);
+        part.castShadow = true;
+        part.receiveShadow = true;
+        stand.add(part);
+        return part;
+      };
+      addPart(new THREE.BoxGeometry(0.13, 0.006, spec.heading ? 0.075 : 0.13), rubber, new THREE.Vector3(standX, 0.003, standZ));
+      addPart(new THREE.BoxGeometry(0.12, 0.012, spec.heading ? 0.070 : 0.12), metal, new THREE.Vector3(standX, 0.012, standZ));
+      const rearMount = new THREE.Vector3(0, 0, 0.035).applyQuaternion(sensor.quaternion).add(sensor.position);
+      const poleTop = new THREE.Vector3(standX, rearMount.y, standZ);
+      const height = poleTop.y - 0.018;
+      addPart(new THREE.CylinderGeometry(0.012, 0.012, height, 20), metal,
+        new THREE.Vector3(standX, 0.018 + height / 2, standZ));
+      addPart(new THREE.CylinderGeometry(0.02, 0.02, 0.024, 20), metal,
+        new THREE.Vector3(standX, 0.03, standZ));
+      addPart(new THREE.SphereGeometry(0.016, 16, 12), metal, poleTop);
+      const connector = rearMount.clone().sub(poleTop);
+      const arm = addPart(new THREE.CylinderGeometry(0.009, 0.009, connector.length(), 16), metal,
+        poleTop.clone().add(rearMount).multiplyScalar(0.5));
+      arm.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), connector.normalize());
+      addPart(new THREE.SphereGeometry(0.012, 16, 12), metal, rearMount);
+      scene.add(stand);
+    }
+    if (id === "wrist") {
+      const anchor = new THREE.Vector3(0.065, 0, 0.02);
+      const bracket = new THREE.Line(new THREE.BufferGeometry().setFromPoints([anchor, sensor.position]),
+        new THREE.LineBasicMaterial({ color: 0x43494d }));
+      parent.add(bracket);
+    }
+  };
+  const wrist = robot.links.arm_link6 ?? robot.links.wrist_roll_link ?? robot.links.base_link;
+  // Centred above the jaws, looking straight along the tool rather than diagonally at it.
+  // The fingertips sit below the optical axis, leaving the central image clear for the object.
+  create("wrist", wrist, [0.085, 0, 0.055], [0.30, 0, 0.055], 80);
+  // Central head camera: behind the base line, above both arms, facing the work area.
+  const headCameraX = Math.max(spec.mount[0] - 0.08, -DESK.width / 2 + 0.11);
+  create("overhead", scene,
+    spec.heading ? [-0.10, spec.mount[1] + 0.50, spec.mount[2] + 0.035] : [headCameraX, spec.mount[1] + 0.50, 0],
+    spec.heading ? [0, 0.045, spec.mount[2] + 0.48] : [spec.mount[0] + 0.48, 0.045, 0], 72);
+
+  for (const button of cameraButtons) {
+    button.addEventListener("click", () => {
+      activeView = button.dataset.camera as typeof activeView;
+      orbitControls.enabled = activeView === "orbit";
+      sceneElement.style.cursor = activeView === "orbit" ? "grab" : "default";
+      for (const item of cameraButtons) item.setAttribute("aria-pressed", String(item.dataset.camera === activeView));
+      document.querySelector("#camera-view-label")!.textContent = activeView === "orbit"
+        ? "DRAG TO ORBIT / SCROLL TO ZOOM"
+        : `${activeView === "overhead" ? "CENTER" : "GRIPPER"} CAMERA / LIVE`;
+    });
+  }
+}
+
+/** Reuse the observation renderer for both live camera previews. */
+function renderSensorPreviews(now: number) {
+  if (now - lastSensorPreview < 100) return;
+  lastSensorPreview = now;
+  for (const [id, sensor] of sensorCameras) {
+    sensor.aspect = OBSERVATION_WIDTH / OBSERVATION_HEIGHT;
+    sensor.updateProjectionMatrix();
+    renderObservationView(sensor);
+    const canvas = sensorCanvases.get(id)!;
+    canvas.getContext("2d")!.drawImage(observationRenderer.domElement, 0, 0, canvas.width, canvas.height);
+  }
+}
+
 function stopRecording() {
   if (!recording) return;
   recording = false;
@@ -1075,7 +1289,7 @@ function stopRecording() {
 
 /** Renders the observation camera and returns the frame as a JPEG data URL. */
 function renderObservation() {
-  observationRenderer.render(scene, observationCamera);
+  renderObservationView(observationCamera);
   return observationRenderer.domElement.toDataURL("image/jpeg", 0.72);
 }
 
@@ -1202,6 +1416,40 @@ function rollTask(): Task {
 /** A spot claimed on the table, with the radius it needs kept clear around it. */
 type Placement = { at: THREE.Vector2; clearance: number };
 
+/** Test the same 4:3 framing as the CENTER preview, with a margin around every cube. */
+function placementVisibleFromCenter(at: THREE.Vector2) {
+  const center = sensorCameras.get("overhead");
+  if (!center) return false;
+  const view = center.clone();
+  view.aspect = OBSERVATION_WIDTH / OBSERVATION_HEIGHT;
+  view.updateProjectionMatrix();
+  view.updateMatrixWorld(true);
+  const half = spec.props.cube / 2;
+  // Cubes start with arbitrary yaw: use their circumscribed horizontal square.
+  const radius = half * Math.SQRT2;
+  for (const dx of [-radius, radius]) {
+    for (const dz of [-radius, radius]) {
+      for (const y of [0, spec.props.cube]) {
+        const point = new THREE.Vector3(at.x + dx, y, at.y + dz).project(view);
+        if (Math.abs(point.x) > 0.85 || Math.abs(point.y) > 0.85 || point.z < -1 || point.z > 1) return false;
+      }
+    }
+  }
+  // Frustum inclusion alone does not catch a cube hidden behind a link or the gripper.
+  const occluders: THREE.Object3D[] = [];
+  robot.traverse((object) => { if (object instanceof THREE.Mesh) occluders.push(object); });
+  const origin = view.getWorldPosition(new THREE.Vector3());
+  const ray = new THREE.Raycaster();
+  for (const [dx, dz] of [[0, 0], [-half, -half], [-half, half], [half, -half], [half, half]]) {
+    const direction = new THREE.Vector3(at.x + dx, spec.props.cube, at.y + dz).sub(origin);
+    ray.set(origin, direction.clone().normalize());
+    ray.near = view.near;
+    ray.far = direction.length() - 0.002;
+    if (ray.intersectObjects(occluders, false).length > 0) return false;
+  }
+  return true;
+}
+
 /**
  * Samples a spot in the arm's reachable annulus that clears everything placed so far. Returns
  * null rather than falling back to a fixed spot, so a cramped layout is retried instead of
@@ -1211,12 +1459,19 @@ function samplePlacement(taken: Placement[], clearance: number) {
   const { min, max, yaw } = spec.reach;
   for (let attempt = 0; attempt < 500; attempt += 1) {
     const radius = THREE.MathUtils.lerp(min, max, Math.random());
-    const angle = THREE.MathUtils.lerp(-yaw, yaw, Math.random());
-    const at = new THREE.Vector2(
-      spec.mount[0] + radius * Math.cos(angle),
-      spec.mount[2] - radius * Math.sin(angle),
-    );
+    // Sample the arm's right half-workspace, then rotate it into the mounting orientation.
+    const angle = THREE.MathUtils.lerp(-yaw, 0, Math.random());
+    const heading = spec.heading ?? 0;
+    const offset = new THREE.Vector3(radius * Math.cos(angle), 0, -radius * Math.sin(angle))
+      .applyAxisAngle(new THREE.Vector3(0, 1, 0), heading);
+    const at = new THREE.Vector2(spec.mount[0] + offset.x, spec.mount[2] + offset.z);
+    // An off-centre arm's reach can extend beyond the desktop. Keep every cube on the table.
+    const edgeMargin = spec.props.cube / 2 + 0.015;
+    if (Math.abs(at.x) > DESK.width / 2 - edgeMargin ||
+        Math.abs(at.y) > DESK.depth / 2 - edgeMargin) continue;
+    if (offset.x * Math.sin(heading) + offset.z * Math.cos(heading) < spec.props.cube + 0.02) continue;
     if (taken.every((other) => other.at.distanceTo(at) >= clearance + other.clearance)) {
+      if (!placementVisibleFromCenter(at)) continue;
       return { at, clearance };
     }
   }
@@ -1224,12 +1479,12 @@ function samplePlacement(taken: Placement[], clearance: number) {
 }
 
 /**
- * One spot per cube, or null if this attempt boxed itself in. They are kept a good way apart:
- * the arm carries a cube kinematically, and a cube passing close over another one would shove
- * it, so the stack has room around it.
+ * One spot per cube, or null if this attempt boxed itself in. Leave room around each cube
+ * so approaching fingers and carried objects do not collide with neighbouring props.
  */
 function sampleLayout() {
-  const clearance = spec.props.cube * 2.2;
+  // Keep generous separation while allowing three cubes in the narrower visible half-workspace.
+  const clearance = spec.props.cube * 1.6;
   const taken: Placement[] = [];
   for (let index = 0; index < props.length; index += 1) {
     const placement = samplePlacement(taken, clearance);
@@ -1240,10 +1495,13 @@ function sampleLayout() {
 }
 
 function newEpisode() {
+  // Visibility must be evaluated at the episode's initial pose, not the previous final pose.
+  resetPose();
+  scene.updateMatrixWorld(true);
   let layout = sampleLayout();
   for (let retry = 0; !layout && retry < 20; retry += 1) layout = sampleLayout();
   if (!layout) {
-    statusElement.textContent = "COULD NOT LAY OUT THE SCENE — WIDEN spec.reach";
+    statusElement.textContent = "NO VISIBLE RIGHT-SIDE LAYOUT FOUND - ADJUST CENTER CAMERA OR REACH";
     return;
   }
 
@@ -1270,7 +1528,6 @@ function newEpisode() {
   replayButton.disabled = true;
   downloadButton.disabled = true;
   updateStats(0);
-  resetPose();
   // Refresh the preview so it shows the scene you are actually looking at. Skipped while
   // generating, where the episode's own first capture lands a frame a moment later anyway.
   if (!generation) previewElement.src = renderObservation();
@@ -1307,7 +1564,7 @@ function updateTaskState() {
 type ScriptStep = { pose: JointValues; duration: number };
 type Script = { steps: ScriptStep[]; start: JointValues; total: number };
 
-// Demonstration speed, not the arm's limit. At 5 Hz capture this puts roughly 12 degrees
+// Demonstration speed, not the arm's limit. At 5 Hz capture this puts roughly 6 degrees
 // between consecutive actions; raise CAPTURE_HZ if a policy needs finer steps than that.
 const ARM_SPEED = 28; // deg/s
 const GRIPPER_SPEED = 90; // percent/s
@@ -1321,12 +1578,6 @@ function stepDuration(from: JointValues, to: JointValues) {
   return seconds;
 }
 
-/**
- * Waypoints for the current task: reach over the cube, drop onto it, close, lift, carry to the
- * zone, lower, let go. Every episode re-rolls the approach pitch, hover height, drop height, a
- * few millimetres of aim jitter and the angle the cube is set down at, so a batch is a spread of
- * demonstrations rather than one trajectory repeated. Returns null when the IK cannot reach.
- */
 /** An episode is two of these: middle cube onto the base, then top cube onto the pair. */
 const STACK_STAGES = 2;
 
@@ -1367,8 +1618,7 @@ function buildStage(sourceId: PropId, level: number): Script | null {
 
   const plan = ((): Array<{ pose: JointValues; hold?: number }> | null => {
     for (let hover = firstHover; hover >= 0.05; hover -= 0.015) {
-      // The carried cube is a kinematic body and will shove anything it clips, so the transit
-      // height has to clear the stack that is already there, not just the cube being picked up.
+      // Clear the existing stack during transit, not just the cube being picked up.
       const transit = level * cube + hover;
       const overSource = grasp.clone().setY(Math.max(cube / 2 + hover, transit));
       const overPlace = place.clone().setY(transit + cube / 2);
@@ -1379,7 +1629,7 @@ function buildStage(sourceId: PropId, level: number): Script | null {
           const solution = spec.solve!(spec.mount, point, pitch, azimuth);
           return solution ? { ...solution, gripper } : null;
         };
-        // hold: repeat a pose so the attach registers, and so a placed cube settles before the cut
+        // Hold poses to let the jaws establish contact and placed cubes settle.
         const attempt: Array<{ pose: JointValues | null; hold?: number }> = [
           { pose: at(overSource, sourceYaw, GRIPPER_OPEN) },
           { pose: at(grasp, sourceYaw, GRIPPER_OPEN) },
@@ -1441,6 +1691,7 @@ function resetPose() {
   Object.assign(currentValues, initialValues);
   Object.assign(targetValues, initialValues);
   updateJointUI(initialValues);
+  resetArmPhysics(initialValues);
   setRobotPose(initialValues);
   statusElement.textContent = "POSE RESET";
 }
@@ -1461,7 +1712,6 @@ declare global {
 type DiskWriter = {
   root: FileSystemDirectoryHandle;
   episodes: FileSystemDirectoryHandle;
-  written: number;
 };
 
 let writer: DiskWriter | null = null;
@@ -1501,7 +1751,6 @@ async function writeEpisode(episode: ReturnType<typeof buildEpisode>, index: num
     ),
   };
   await writeFile(directory, "episode.json", JSON.stringify(record));
-  writer!.written += 1;
 }
 
 async function writeDatasetMeta(summary: { completed: number; succeeded: number }) {
@@ -1620,11 +1869,12 @@ async function startGeneration() {
   episodeCountElement.value = String(requested);
 
   writer = null;
-  if (canWriteToDisk()) {
+  const outputMode = document.querySelector<HTMLSelectElement>("#generation-output")!.value;
+  if (canWriteToDisk() && outputMode === "folder") {
     try {
       // Must be called straight off the click: the picker needs the user gesture.
       const root = await window.showDirectoryPicker({ mode: "readwrite" });
-      writer = { root, episodes: await root.getDirectoryHandle("episodes", { create: true }), written: 0 };
+      writer = { root, episodes: await root.getDirectoryHandle("episodes", { create: true }) };
     } catch {
       statusElement.textContent = "NO FOLDER CHOSEN — GENERATION CANCELLED";
       return;
@@ -1637,7 +1887,7 @@ async function startGeneration() {
   datasetButton.disabled = true;
   statusElement.textContent = writer
     ? `GENERATING 0/${requested} — WRITING TO ${writer.root.name}/`
-    : `GENERATING 0/${requested} — IN MEMORY (THIS BROWSER CANNOT WRITE TO A FOLDER)`;
+    : `GENERATING 0/${requested} - IN MEMORY / DOWNLOAD JSON WHEN COMPLETE`;
 }
 
 function runGeneration() {
@@ -1719,7 +1969,13 @@ function animate(now: number) {
   }
   updateTaskState();
   orbitControls.update();
-  renderer.render(scene, camera);
+  // Mounted cameras need their parent link transforms updated before rendering.
+  scene.updateMatrixWorld(true);
+  renderSensorPreviews(now);
+  const viewCamera = activeView === "orbit" ? camera : sensorCameras.get(activeView)!;
+  viewCamera.aspect = camera.aspect;
+  viewCamera.updateProjectionMatrix();
+  renderer.render(scene, viewCamera);
 
   if (recording && now - lastSample >= SAMPLE_INTERVAL) {
     captureFrame((now - recordStart) / 1000);
@@ -1727,6 +1983,7 @@ function animate(now: number) {
   }
 }
 
+setupSensorCameras();
 buildJointControls();
 resizeRenderer();
 useBackdrop(0);
