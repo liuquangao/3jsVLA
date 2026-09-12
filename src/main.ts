@@ -638,6 +638,8 @@ function syncPropMeshes() {
 function stepPhysics(deltaSeconds: number) {
   physicsAccumulator = Math.min(physicsAccumulator + deltaSeconds, 0.1);
   while (physicsAccumulator >= PHYSICS_STEP) {
+    // Rapier clears accumulated forces after every step, so this belongs inside the loop.
+    applyGravityCompensation();
     physics.step();
     physicsAccumulator -= PHYSICS_STEP;
   }
@@ -661,13 +663,25 @@ function stepPhysics(deltaSeconds: number) {
 /** The link bolted to the desk. Both URDFs here name it the same thing. */
 const ROOT_LINK = "base_link";
 /**
- * Tuned by sweeping against the settled tracking error at the home pose. The interesting part is
- * that stiffness alone does almost nothing: at a 1/120 step the shoulder sat 26 degrees low no
- * matter the gain, because a stiff motor needs a step small enough to integrate it. At 1/480 the
- * same gain tracks to about a degree. That is why PHYSICS_STEP is 1/480 and not 1/120.
+ * A semi-implicit integrator goes unstable somewhere around stiffness * dt^2 = 1, which at a
+ * 1/480 step puts the ceiling near 230000. This ran at 5e6 for a while — twenty times over —
+ * which tracked to a degree but left the arm buzzing at 2.5-4.3 rad/s while "holding still" and
+ * ringing for seconds after every move. It was that high only to mask gravity droop, which
+ * applyGravityCompensation now removes at the source.
+ *
+ * Measured, with the compensation in place: at 150000 (inside the stable band) the arm is quiet
+ * and its steady-state error is about a degree, but it is too soft to follow the scripted
+ * trajectory — the peak lag reached 80 degrees and the task nearly stopped working. This is the
+ * compromise that follows the script while staying four times below where it was.
  */
-let motorStiffness = 5_000_000;
-let motorDamping = 2 * Math.sqrt(5_000_000);
+let motorStiffness = 1_200_000;
+/**
+ * About ten times "critical", found by sweeping the step response. Critical damping in the
+ * textbook sense is badly underdamped here, because the ringing lives in the compliance of the
+ * joint constraints between links rather than in the joint's own degree of freedom, and the motor
+ * only sees the latter. Higher still stops the ringing but leaves the arm crawling to its target.
+ */
+let motorDamping = 6_000;
 /** Generous compared to the real arm's 3.5-25 Nm limits: the sim has no gravity-compensation
  *  controller, so the motors carry the whole load themselves. */
 const MOTOR_MAX_FORCE = 1_000_000;
@@ -680,6 +694,8 @@ const GRIP_FORCE = 30;
 
 /** Jaw plate colliders, used to tell by contact whether something is actually being gripped. */
 const fingerColliders: RAPIER.Collider[] = [];
+/** Every body in the arm, so accumulated torques can be cleared before each step. */
+const armBodies: RAPIER.RigidBody[] = [];
 /** Cap on hull points per link: the STLs run to tens of thousands of vertices and the hull of a
  *  dense mesh is unchanged by sampling it. */
 const HULL_POINT_BUDGET = 4000;
@@ -692,6 +708,8 @@ type ArmJoint = {
   axis: THREE.Vector3;
   anchor: THREE.Vector3;
   prismatic: boolean;
+  /** Every body this joint carries — its child and everything beyond it. */
+  load: RAPIER.RigidBody[];
 };
 
 /**
@@ -791,6 +809,7 @@ function buildArmDynamics() {
       if (mass && mass > 0) collider.setMass(mass);
     }
     bodies.set(name, body);
+    armBodies.push(body);
   }
 
   const joints = new Map<string, ArmJoint>();
@@ -826,7 +845,21 @@ function buildArmDynamics() {
         fingerColliders.push(child.collider(index));
       }
     }
-    joints.set(name, { joint, parent, child, axis, anchor, prismatic });
+    // Everything from the child link outwards is what this joint has to hold up.
+    const load: RAPIER.RigidBody[] = [];
+    const gather = (link: URDFLink) => {
+      const body = bodies.get(link.urdfName);
+      if (body) load.push(body);
+      link.traverse((object) => {
+        const child = object as URDFLink;
+        if (child !== link && child.isURDFLink && bodies.has(child.urdfName)) {
+          load.push(bodies.get(child.urdfName)!);
+        }
+      });
+    };
+    gather(childLink);
+
+    joints.set(name, { joint, parent, child, axis, anchor, prismatic, load });
   }
 
   physics.numSolverIterations = 16;
@@ -840,6 +873,61 @@ const parentRotation = new THREE.Quaternion();
 const childRotation = new THREE.Quaternion();
 const relativeRotation = new THREE.Quaternion();
 const relativeOffset = new THREE.Vector3();
+
+const GRAVITY = new THREE.Vector3(0, -9.81, 0);
+const axisWorld = new THREE.Vector3();
+const jointOrigin = new THREE.Vector3();
+const lever = new THREE.Vector3();
+const weight = new THREE.Vector3();
+const torque = new THREE.Vector3();
+const bodyRotation = new THREE.Quaternion();
+
+/**
+ * Gravity compensation.
+ *
+ * Without it the motors have to invent the torque that holds the arm against its own weight, and
+ * on this chain they cannot do it at any stable gain: a stiffness low enough to integrate at this
+ * timestep leaves the shoulder tens of degrees low, and one high enough to stand up buzzes,
+ * because the stability ceiling is about 1/dt^2. Both were measured, and there was no setting
+ * that was neither soft nor shaking.
+ *
+ * So the weight is cancelled directly instead. For each joint, sum the gravity torque of every
+ * body it carries about its own axis and apply the opposite as an actuator torque pair — equal
+ * and opposite on child and parent, which is what a real joint does. The motors are then only
+ * correcting the residual, which modest and stable gains handle. This is what a real arm's
+ * controller does too.
+ */
+function applyGravityCompensation() {
+  if (!armJoints) return;
+  // addTorque accumulates until reset, and this runs once per substep — without clearing first,
+  // a frame's worth of substeps stacks up to fifty times the intended torque and the arm flies.
+  for (const body of armBodies) body.resetTorques(false);
+
+  for (const entry of armJoints.values()) {
+    // The fingers carry 138 g each and are not fighting gravity in any meaningful way.
+    if (entry.prismatic) continue;
+
+    const at = entry.parent.rotation();
+    bodyRotation.set(at.x, at.y, at.z, at.w);
+    axisWorld.copy(entry.axis).applyQuaternion(bodyRotation).normalize();
+
+    const from = entry.parent.translation();
+    jointOrigin.copy(entry.anchor).applyQuaternion(bodyRotation).add(new THREE.Vector3(from.x, from.y, from.z));
+
+    let along = 0;
+    for (const body of entry.load) {
+      const com = body.worldCom();
+      lever.set(com.x - jointOrigin.x, com.y - jointOrigin.y, com.z - jointOrigin.z);
+      weight.copy(GRAVITY).multiplyScalar(body.mass());
+      along += lever.cross(weight).dot(axisWorld);
+    }
+
+    torque.copy(axisWorld).multiplyScalar(-along);
+    entry.child.addTorque(torque, false);
+    torque.negate();
+    entry.parent.addTorque(torque, false);
+  }
+}
 
 /** Reads a joint's actual position back out of the solver, in URDF units. */
 function measureJoint(entry: ArmJoint) {
