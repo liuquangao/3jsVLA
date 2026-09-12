@@ -832,7 +832,7 @@ function updateReplay(now: number) {
 
 function buildEpisode() {
   return {
-    format: "nanovla.episode.v1",
+    format: "3jsvla.episode.v1",
     robot: spec.id,
     instruction: instructionElement.value.trim(),
     task: { object: task.object, target: task.target },
@@ -861,7 +861,7 @@ function downloadEpisode() {
 function downloadDataset() {
   downloadJSON(
     {
-      format: "nanovla.dataset.v1",
+      format: "3jsvla.dataset.v1",
       robot: spec.id,
       capture_hz: CAPTURE_HZ,
       created_at: new Date().toISOString(),
@@ -1185,7 +1185,7 @@ async function writeDatasetMeta(summary: { completed: number; succeeded: number 
     "meta.json",
     JSON.stringify(
       {
-        format: "nanovla.dump.v1",
+        format: "3jsvla.dump.v1",
         robot: spec.id,
         capture_hz: CAPTURE_HZ,
         image: { width: OBSERVATION_WIDTH, height: OBSERVATION_HEIGHT },

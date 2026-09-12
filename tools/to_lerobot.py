@@ -1,4 +1,4 @@
-"""Convert a NanoVLA collector dump into a LeRobotDataset v3.0.
+"""Convert a 3jsVLA collector dump into a LeRobotDataset v3.0.
 
 The browser writes a deliberately dumb tree — one directory per episode, frames as plain
 JPEGs, everything else as JSON. This script turns that into a real LeRobot dataset by
@@ -7,7 +7,7 @@ on-disk format stays correct without this file having to know what it looks like
 
     python tools/to_lerobot.py <dump-dir> --repo-id <user>/<name> --root <output-dir>
 
-Input layout (nanovla.dump.v1):
+Input layout (3jsvla.dump.v1):
 
     <dump-dir>/
     ├── meta.json
@@ -31,11 +31,15 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 CAMERA_KEY = "observation.images.front"
 
+# The project was called NanoVLA before it was called 3jsVLA. Dumps written under the old name
+# have the same layout, so they are still accepted rather than being orphaned by a rename.
+DUMP_FORMATS = {"3jsvla.dump.v1", "nanovla.dump.v1"}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("source", type=Path, help="the folder the collector wrote")
-    parser.add_argument("--repo-id", required=True, help="e.g. yourname/nanovla-a1z-pickplace")
+    parser.add_argument("--repo-id", required=True, help="e.g. yourname/3jsvla-a1z-pickplace")
     parser.add_argument("--root", type=Path, default=None, help="where to write (default: the HF cache)")
     parser.add_argument(
         "--success-only",
@@ -53,8 +57,10 @@ def load_dump(source: Path) -> tuple[dict, list[Path]]:
             "the one holding meta.json and episodes/."
         )
     meta = json.loads(meta_path.read_text())
-    if meta.get("format") != "nanovla.dump.v1":
-        raise SystemExit(f"unexpected dump format {meta.get('format')!r}, expected 'nanovla.dump.v1'")
+    if meta.get("format") not in DUMP_FORMATS:
+        raise SystemExit(
+            f"unexpected dump format {meta.get('format')!r}, expected one of {sorted(DUMP_FORMATS)}"
+        )
 
     episodes = sorted((source / "episodes").iterdir())
     if not episodes:

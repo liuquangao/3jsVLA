@@ -104,7 +104,7 @@ The collector writes a deliberately dumb tree — one directory per episode, fra
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r tools/requirements.txt
-.venv/bin/python tools/to_lerobot.py <folder> --repo-id you/nanovla-a1z --root ./lerobot_out
+.venv/bin/python tools/to_lerobot.py <folder> --repo-id you/3jsvla-a1z --root ./lerobot_out
 ```
 
 It drives `LeRobotDataset` itself rather than writing Parquet and MP4 by hand, so the on-disk
@@ -114,7 +114,7 @@ back:
 
 ```python
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-ds = LeRobotDataset("you/nanovla-a1z", root="./lerobot_out")
+ds = LeRobotDataset("you/3jsvla-a1z", root="./lerobot_out")
 ds[20]["observation.images.front"]  # torch.float32 [3, 192, 256], decoded from the mp4
 ds[20]["task"]                      # "Move the red cube to the circle."
 ```
@@ -203,7 +203,7 @@ Three.js provides the scene, camera, rendering, and browser interface. Simple ki
 ## Project Structure
 
 ```text
-NanoVLA/
+3jsVLA/
 ├── tools/
 │   ├── to_lerobot.py            # dump -> LeRobotDataset v3.0
 │   └── requirements.txt
@@ -241,7 +241,7 @@ action is the commanded pose one capture interval ahead — what a policy would 
 that frame to produce the motion that follows.
 
 Generated episodes go to a folder as the tree above, or — where the browser cannot write to one —
-come back as a single file of the same episodes under `format: "nanovla.dataset.v1"`.
+come back as a single file of the same episodes under `format: "3jsvla.dataset.v1"`.
 
 Generated episodes run on a fixed simulated clock rather than wall time, so the dataset comes out
 the same however fast the machine is, and a stalled tab cannot stretch a trajectory.
