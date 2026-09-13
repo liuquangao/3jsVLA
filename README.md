@@ -1,10 +1,16 @@
 # 3jsVLA
 
-![3jsVLA robot manipulation demo](docs/3jsvla-demo.gif)
+![3jsVLA browser-based robot data collector](docs/collector-ui.png)
 
 3jsVLA is a compact, browser-based robot manipulation environment for learning the complete Vision-Language-Action data loop. It renders an A1Z arm with a G1Z parallel gripper in Three.js, simulates contacts and rigid-body dynamics with Rapier, and records camera observations, robot state, language instructions, and actions as training episodes.
 
 The current task is simple and varied: **move the requested coloured cube into the yellow target area**. Cube positions, target position, requested colour, cube rotations, and HDR environment are randomised for every episode.
+
+## Task Demo
+
+The scripted controller approaches the requested cube, establishes a physical bilateral grasp, moves it to the target, releases it, and returns the arm to its neutral pose.
+
+![A1Z robot moving a requested cube into the target area](docs/3jsvla-demo.gif)
 
 ## Features
 
