@@ -317,7 +317,7 @@ const GRIPPER_SHUT = spec.grasp.fullOpening
   ? THREE.MathUtils.clamp(((spec.props.cube - GRIPPER_SQUEEZE) / spec.grasp.fullOpening) * 100, 0, 95)
   : (spec.grasp.closedAt ?? 45);
 
-const CAPTURE_HZ = 5;
+const CAPTURE_HZ = 10;
 const SAMPLE_INTERVAL = 1000 / CAPTURE_HZ;
 
 /**

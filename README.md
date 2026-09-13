@@ -112,7 +112,7 @@ Three.js renderer - Robot controller - Rapier physics
 - **Three.js** renders the scene, URDF meshes, cameras, lighting, and interface.
 - **Rapier** computes arm, gripper, object, contact, and desk physics.
 - **Constrained IK/QP** plans reachable task-space waypoints.
-- **The recorder** samples RGB, state, and next-step actions at 5 Hz.
+- **The recorder** samples RGB, state, and next-step actions at 10 Hz.
 - **Python tooling** converts browser output into a training-ready LeRobot dataset.
 
 ## Project Structure
