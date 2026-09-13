@@ -44,9 +44,9 @@ http://127.0.0.1:5173/?robot=so101
 ## Generate Demonstrations
 
 1. Enter the number of episodes in **Auto-generate**.
-2. Keep **Output** set to **Project data/**.
+2. Keep **Output** set to **LeRobot v3 + raw**.
 3. Press **Generate** and keep the page in the foreground.
-4. Completed episodes are written to a timestamped directory under `data/`.
+4. Completed episodes are written to a timestamped directory under `data/`, then successful episodes are converted to LeRobotDataset v3 automatically.
 
 Every episode starts and ends at the neutral command pose:
 
@@ -62,12 +62,13 @@ An episode is successful when the requested cube is released, resting on the tab
 ```text
 data/<run-id>/
 |-- meta.json
-`-- episodes/
+|-- episodes/                    # recoverable raw capture
     `-- episode_00000/
         |-- episode.json
         `-- frames/
             |-- 000000.jpg
             `-- ...
+`-- lerobot_v3/                  # training-ready Parquet, MP4 and metadata
 ```
 
 Each frame contains:
@@ -83,17 +84,20 @@ action.joint_targets
 
 `joint_positions` records the measured physical state. `joint_targets` records the command a policy should produce. Object poses and grasp state are ground truth for debugging and evaluation; they are not required as policy inputs.
 
-## Convert to LeRobot
+## LeRobot v3 Output
 
-Create a Python environment and install the converter requirements:
+Automatic conversion uses the official `LeRobotDataset` writer. Install its Python environment once before generating:
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\python -m pip install -r tools\requirements.txt
-.venv\Scripts\python tools\to_lerobot.py data\<run-id> --repo-id you/3jsvla-a1z --root lerobot_out
 ```
 
-On Linux or macOS, replace `.venv\Scripts\python` with `.venv/bin/python`.
+On Linux or macOS, replace `.venv\Scripts\python` with `.venv/bin/python`. If the dependency is unavailable, collection still preserves the raw run and the page reports the setup command. Existing runs can always be converted manually:
+
+```powershell
+.venv\Scripts\python tools\to_lerobot.py data\<run-id> --repo-id you/3jsvla-a1z --root lerobot_out --success-only
+```
 
 ## Architecture
 

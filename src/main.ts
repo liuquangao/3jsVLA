@@ -1939,6 +1939,7 @@ type DiskWriter = {
 } | {
   root: { name: string };
   localRun: string;
+  convertToLerobot: boolean;
 };
 
 let writer: DiskWriter | null = null;
@@ -2187,13 +2188,19 @@ function finishGeneration(problem?: string) {
   if (writer) {
     const finished = writer;
     writeDatasetMeta(summary)
-      .then(() => {
+      .then(async () => {
+        if (summary.succeeded > 0 && "localRun" in finished && finished.convertToLerobot) {
+          statusElement.textContent = `${report} — CONVERTING SUCCESSFUL EPISODES TO LEROBOT V3`;
+          const result = await postDataset("convert", { run: finished.localRun });
+          statusElement.textContent = `${report} — LEROBOT V3 READY AT ${result.name}/`;
+          return;
+        }
         statusElement.textContent = summary.completed > 0
-          ? `${report} — RUN tools/to_lerobot.py ON ${finished.root.name}/`
+          ? `${report} — RAW DATA READY AT ${finished.root.name}/`
           : `${report} — NO COMPLETED EPISODES SAVED`;
       })
       .catch((error) => {
-        statusElement.textContent = `${report} — COULD NOT WRITE meta.json: ${error}`;
+        statusElement.textContent = `${report} — FINALIZATION FAILED: ${error}`;
       });
   }
   statusElement.textContent = report;
@@ -2209,10 +2216,14 @@ async function startGeneration() {
 
   writer = null;
   const outputMode = document.querySelector<HTMLSelectElement>("#generation-output")!.value;
-  if (outputMode === "local") {
+  if (outputMode === "local" || outputMode === "lerobot") {
     try {
       const result = await postDataset("start", {});
-      writer = { root: { name: result.name }, localRun: result.run };
+      writer = {
+        root: { name: result.name },
+        localRun: result.run,
+        convertToLerobot: outputMode === "lerobot",
+      };
     } catch (error) {
       statusElement.textContent = `CANNOT WRITE PROJECT data/ - USE THE LOCAL VITE SERVER: ${error}`;
       return;

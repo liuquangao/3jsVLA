@@ -1,12 +1,29 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import path from "node:path";
+
+function runProcess(command, args, cwd) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { cwd, windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve(stdout.trim());
+      else reject(new Error((stderr || stdout || `converter exited with code ${code}`).trim()));
+    });
+  });
+}
 
 /** Local-only dataset writer. No client-supplied filesystem paths are accepted. */
 export function datasetServer() {
   return {
     name: "local-dataset-writer",
     configureServer(server) {
-      const dataRoot = path.join(server.config.root, "data");
+      const projectRoot = server.config.root;
+      const dataRoot = path.join(projectRoot, "data");
       const runs = new Map();
 
       server.middlewares.use(async (req, res, next) => {
@@ -50,6 +67,43 @@ export function datasetServer() {
 
           const directory = runs.get(payload.run);
           if (!directory) return reply(400, { error: "Unknown dataset run; start a new generation" });
+          if (route === "/__dataset/convert") {
+            const meta = JSON.parse(await readFile(path.join(directory, "meta.json"), "utf8"));
+            if (!meta.successes) return reply(400, { error: "No successful episodes to convert" });
+            const venvPython = path.join(
+              projectRoot,
+              ".venv",
+              process.platform === "win32" ? "Scripts/python.exe" : "bin/python",
+            );
+            let python = process.env.PYTHON || "python";
+            try {
+              await access(venvPython);
+              python = venvPython;
+            } catch {
+              // Fall back to PATH; converter errors are returned to the collector UI.
+            }
+            const output = path.join(directory, "lerobot_v3");
+            try {
+              const log = await runProcess(
+                python,
+                [
+                  path.join(projectRoot, "tools", "to_lerobot.py"),
+                  directory,
+                  "--repo-id",
+                  `local/3jsvla-${meta.robot}`,
+                  "--root",
+                  output,
+                  "--success-only",
+                ],
+                projectRoot,
+              );
+              return reply(200, { saved: true, name: `data/${payload.run}/lerobot_v3`, log });
+            } catch (error) {
+              return reply(500, {
+                error: `LeRobot v3 conversion failed: ${error instanceof Error ? error.message : String(error)}. Install tools/requirements.txt into .venv and retry.`,
+              });
+            }
+          }
           if (route === "/__dataset/meta") {
             await writeFile(path.join(directory, "meta.json"), JSON.stringify(payload.meta, null, 2));
             return reply(200, { saved: true });
