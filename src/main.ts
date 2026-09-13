@@ -1778,9 +1778,9 @@ type ScriptStep = {
 };
 type Script = { steps: ScriptStep[]; start: JointValues; total: number };
 
-// Demonstration speed, not the arm's limit. Raise CAPTURE_HZ when a policy needs
-// between consecutive actions; raise CAPTURE_HZ if a policy needs finer steps than that.
-const ARM_SPEED = 28; // deg/s
+// Demonstration speed, not the arm's limit. A moderate rate lets the physical
+// arm settle at the hover pose instead of visibly catching up before descent.
+const ARM_SPEED = 22; // deg/s
 const GRIPPER_SPEED = 90; // percent/s
 
 function stepDuration(from: JointValues, to: JointValues) {
