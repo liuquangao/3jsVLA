@@ -1,7 +1,6 @@
 import RAPIER from "@dimforge/rapier3d-compat";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
 import URDFLoader, { type URDFLink, type URDFRobot } from "urdf-loader";
@@ -594,13 +593,7 @@ physics.createCollider(
   RAPIER.ColliderDesc.cuboid(6, 0.05, 6).setTranslation(0, -DESK.top - 0.05, 0).setFriction(0.9),
 );
 
-const cubeGeometry = new RoundedBoxGeometry(
-  spec.props.cube,
-  spec.props.cube,
-  spec.props.cube,
-  4,
-  Math.min(0.0025, spec.props.cube * 0.07),
-);
+const cubeGeometry = new THREE.BoxGeometry(spec.props.cube, spec.props.cube, spec.props.cube);
 
 /** Subtle moulded-rubber grain keeps colour labels clear without perfectly flat CG surfaces. */
 function createCubeTexture(color: number, seed: number) {
