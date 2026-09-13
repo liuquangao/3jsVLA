@@ -1,6 +1,7 @@
 import RAPIER from "@dimforge/rapier3d-compat";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
 import URDFLoader, { type URDFLink, type URDFRobot } from "urdf-loader";
@@ -593,12 +594,66 @@ physics.createCollider(
   RAPIER.ColliderDesc.cuboid(6, 0.05, 6).setTranslation(0, -DESK.top - 0.05, 0).setFriction(0.9),
 );
 
-const cubeGeometry = new THREE.BoxGeometry(spec.props.cube, spec.props.cube, spec.props.cube);
+const cubeGeometry = new RoundedBoxGeometry(
+  spec.props.cube,
+  spec.props.cube,
+  spec.props.cube,
+  4,
+  Math.min(0.0025, spec.props.cube * 0.07),
+);
 
-const props: Prop[] = PROP_SPECS.map((propSpec) => {
+/** Subtle moulded-rubber grain keeps colour labels clear without perfectly flat CG surfaces. */
+function createCubeTexture(color: number, seed: number) {
+  const size = 192;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext("2d")!;
+  const base = new THREE.Color(color);
+  const pixels = context.createImageData(size, size);
+  let state = seed >>> 0;
+  const random = () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 0xffffffff;
+  };
+  for (let index = 0; index < pixels.data.length; index += 4) {
+    const grain = (random() - 0.5) * 0.075;
+    pixels.data[index] = Math.round(255 * THREE.MathUtils.clamp(base.r + grain, 0, 1));
+    pixels.data[index + 1] = Math.round(255 * THREE.MathUtils.clamp(base.g + grain, 0, 1));
+    pixels.data[index + 2] = Math.round(255 * THREE.MathUtils.clamp(base.b + grain, 0, 1));
+    pixels.data[index + 3] = 255;
+  }
+  context.putImageData(pixels, 0, 0);
+  context.globalAlpha = 0.08;
+  context.strokeStyle = "#ffffff";
+  context.lineWidth = 0.7;
+  for (let mark = 0; mark < 14; mark += 1) {
+    const x = random() * size;
+    const y = random() * size;
+    context.beginPath();
+    context.moveTo(x, y);
+    context.lineTo(x + 5 + random() * 18, y + (random() - 0.5) * 3);
+    context.stroke();
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
+  return texture;
+}
+
+const props: Prop[] = PROP_SPECS.map((propSpec, index) => {
+  const texture = createCubeTexture(propSpec.color, 0x3a51c + index * 7919);
   const mesh = new THREE.Mesh(
     cubeGeometry,
-    new THREE.MeshStandardMaterial({ color: propSpec.color, roughness: 0.7 }),
+    new THREE.MeshPhysicalMaterial({
+      map: texture,
+      roughness: 0.64,
+      metalness: 0,
+      clearcoat: 0.08,
+      clearcoatRoughness: 0.78,
+      bumpMap: texture,
+      bumpScale: 0.00012,
+    }),
   );
   mesh.castShadow = true;
   mesh.receiveShadow = true;
