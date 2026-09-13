@@ -2276,6 +2276,8 @@ function runGeneration() {
         // Hand it to disk and stop ticking until it lands, so memory stays flat.
         const pending = generation;
         pending.flushing = true;
+        statusElement.textContent =
+          `SAVING EPISODE ${generation.completed}/${generation.requested} — ${frames.length} FRAMES`;
         writeEpisode(episode, index)
           .then(() => {
             pending.flushing = false;

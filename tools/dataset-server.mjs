@@ -67,12 +67,19 @@ export function datasetServer() {
           const episodeDir = path.join(directory, "episodes", `episode_${String(index).padStart(5, "0")}`);
           await mkdir(episodeDir);
           await mkdir(path.join(episodeDir, "frames"));
-          const frames = [];
-          for (const [frameIndex, frame] of episode.frames.entries()) {
-            const { image, ...observation } = frame.observation;
-            const file = `${String(frameIndex).padStart(6, "0")}.jpg`;
-            await writeFile(path.join(episodeDir, "frames", file), Buffer.from(image.slice(image.indexOf(",") + 1), "base64"));
-            frames.push({ ...frame, observation: { ...observation, image_path: `frames/${file}` } });
+          const frames = new Array(episode.frames.length);
+          // Hundreds of sequential writes can leave the arm visibly idle for a
+          // minute at 10 FPS. Bounded batches keep Windows responsive while
+          // allowing independent JPEG writes to proceed concurrently.
+          const WRITE_BATCH_SIZE = 32;
+          for (let offset = 0; offset < episode.frames.length; offset += WRITE_BATCH_SIZE) {
+            await Promise.all(episode.frames.slice(offset, offset + WRITE_BATCH_SIZE).map(async (frame, batchIndex) => {
+              const frameIndex = offset + batchIndex;
+              const { image, ...observation } = frame.observation;
+              const file = `${String(frameIndex).padStart(6, "0")}.jpg`;
+              await writeFile(path.join(episodeDir, "frames", file), Buffer.from(image.slice(image.indexOf(",") + 1), "base64"));
+              frames[frameIndex] = { ...frame, observation: { ...observation, image_path: `frames/${file}` } };
+            }));
           }
           await writeFile(path.join(episodeDir, "episode.json"), JSON.stringify({ ...episode, frames }));
           reply(200, { saved: true });
