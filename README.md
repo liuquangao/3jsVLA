@@ -1,316 +1,143 @@
 # 3jsVLA
 
-![The collector: a Galaxea A1Z on a desk, three cubes to stack, a randomised room behind](docs/scene.jpg)
+![3jsVLA robot manipulation demo](docs/3jsvla-demo.gif)
 
-3jsVLA is a minimal Vision-Language-Action (VLA) project for learning how a VLA system works from end to end.
+3jsVLA is a compact, browser-based robot manipulation environment for learning the complete Vision-Language-Action data loop. It renders an A1Z arm with a G1Z parallel gripper in Three.js, simulates contacts and rigid-body dynamics with Rapier, and records camera observations, robot state, language instructions, and actions as training episodes.
 
-The goal is to let users build each part step by step:
+The current task is simple and varied: **move the requested coloured cube into the yellow target area**. Cube positions, target position, requested colour, cube rotations, and HDR environment are randomised for every episode.
 
-1. Create a small robot environment with Three.js.
-2. Control the robot and collect demonstrations in the browser.
-3. Save images, language instructions, robot states, and actions.
-4. Train a small policy with behavior cloning.
-5. Run the policy in the environment and evaluate the result.
+## Features
 
-The first working component is a browser-based data collector built with Three.js and Rapier. It
-loads the official Galaxea (星海图) A1Z URDF with the G1Z parallel gripper, using the vendor's own
-STL meshes and joint names (`arm_joint1` … `arm_joint6`), stands it on an office desk in a room,
-and puts it in front of three coloured cubes it can actually pick up and stack.
+- Three.js scene with the official A1Z/G1Z URDF and mesh assets
+- Rapier rigid-body physics for the arm, gripper, cubes, and desk
+- Constrained numerical IK with collision-aware vertical approaches
+- Friction-based grasping using the physical finger geometry
+- Gripper-mounted and central overview RGB cameras
+- Manual control, recording, replay, and automatic demonstration generation
+- Per-episode scene and HDR randomisation
+- Direct output to the project `data/` directory through the local Vite server
+- Conversion to LeRobotDataset v3 with `tools/to_lerobot.py`
 
-## Run the Collector
+## Quick Start
+
+Requirements: Node.js 20 or newer and a modern desktop browser.
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open the local URL shown by Vite. Set a count, press **Generate**, and it collects that many
-episodes on its own, then hands you the dataset as JSON. The joint sliders are still there to
-record an episode by hand, but they are for seeing how the loop works, not for bulk collection.
+Open the URL printed by Vite, normally [http://127.0.0.1:5173](http://127.0.0.1:5173).
 
-The robot is chosen by a query parameter, so the earlier SO-101 arm is still one URL away:
+The default robot is A1Z + G1Z. The legacy SO-101 scene remains available at:
 
 ```text
-http://localhost:5173/            # Galaxea A1Z + G1Z (default)
-http://localhost:5173/?robot=so101   # SO-101
+http://127.0.0.1:5173/?robot=so101
 ```
 
-Both arms are entries in the `ROBOTS` table at the top of `src/main.ts`. An entry declares its
-URDF, where the base is mounted, the two camera framings, and one slider per control — so adding a
-third arm means adding a `RobotSpec`, not editing the collector.
+## Generate Demonstrations
 
-## The Task
+1. Enter the number of episodes in **Auto-generate**.
+2. Keep **Output** set to **Project data/**.
+3. Press **Generate** and keep the page in the foreground.
+4. Completed episodes are written to a timestamped directory under `data/`.
 
-Stack three cubes in the order the instruction names. There are no target markings on the desk —
-the cubes *are* the targets:
+Every episode starts and ends at the neutral command pose:
 
 ```text
-Instruction: "Stack the green cube on the blue cube, then put the red cube on top."
-Observation: RGB image + robot state
-Action:      Six joint targets + gripper target
-Success:     the three cubes at rest, stacked in that order, nothing in the gripper
+J1-J6: 0 degrees
+Gripper: 100% open
 ```
 
-Three cubes give six orderings, and every episode re-scatters them and re-rolls the instruction.
-The point is that **the instruction has to be read**, and read as a sequence: moving both cubes
-but stacking them the wrong way round is a failure. With one cube and one target, a policy scores
-perfectly while ignoring the language entirely, and nothing in the training curves says the
-channel is dead.
+An episode is successful when the requested cube is released, resting on the table, and fully inside the yellow circle. A 60-second wall-clock timeout stops a run that becomes stuck. Failed or interrupted episodes are not written as completed demonstrations.
 
-Success is decided by physics rather than a region test. A cube has to actually be sitting at its
-level and lined up over the base, so a stack that topples, or a cube placed a few millimetres off
-that slides away, simply fails. Failed episodes are kept — `tools/to_lerobot.py --success-only`
-filters them out at training time, and they are worth having for anything else.
-
-This is what the policy sees, at 256 x 192:
-
-![A single observation frame](docs/observation.jpg)
-
-## Generating Data
-
-Demonstrations are scripted, not teleoperated. Dragging seven sliders produces trajectories that
-move one joint at a time, and a policy trained on those learns slider-wiggling rather than
-reaching — so the collector drives itself instead.
-
-Each episode is two legs: fetch the middle cube and set it on the base, then fetch the top cube
-and set it on the pair. The second leg is planned only once the first has landed, from where the
-world actually ended up, so any drift in the base cube while a cube settled onto it is taken into
-account rather than assumed away. Every leg re-rolls the approach pitch, the hover height and a
-little aim error — placement jitter far tighter than pick jitter, because a few millimetres off
-and the stack topples.
-
-Pressing Generate asks for a folder and streams episodes into it as they finish, so memory stays
-flat however many you ask for. Browsers without the File System Access API (Firefox, Safari) fall
-back to collecting in memory and handing the lot over as one JSON download.
-
-Generation is driven from the animation loop in ~8 ms slices, so the page keeps rendering and you
-can watch it collect. That also means it needs a **foreground tab** — a backgrounded tab stops
-getting animation frames and generation stalls until you come back. Episodes run on a fixed
-simulated clock rather than wall time, so the dataset comes out the same however fast the machine
-is, and a stalled tab cannot stretch a trajectory.
-
-Expect most episodes to fail, and expect that to stay true. Three things compound: the stack is
-decided by physics, the arm is simulated so it does not land exactly where the script commands,
-and the grip is friction so it can slip. On a recent run of 12, five got the first cube stacked,
-two got both, and one cleared every check — call it **under 10%**.
-
-That is honest rather than good. A scripted policy that plans exact IK waypoints and assumes it
-arrives is the wrong controller for an arm that lags; closing that loop, rather than slowing the
-script further, is what would move the number. Failures are still worth keeping —
-`--success-only` filters them for behaviour cloning and they are the interesting part for
-anything else — but a behaviour-cloning set wants far more successes than this.
-
-Knobs worth knowing, all in `src/main.ts`:
-
-| Knob | Does what |
-| --- | --- |
-| `ARM_SPEED` | Demonstration speed. Slower gives the arm time to converge before the gripper acts. |
-| `CAPTURE_HZ` | Raise it if a policy needs finer action steps. |
-| `jitter(...)` in `buildStage` | Aim error. Widen it to breed more failures into the dataset. |
-| `motorStiffness` / `PHYSICS_STEP` | How tightly the arm tracks its command. They are coupled — see Physics. |
-
-## Getting the Data Out
-
-The collector writes a deliberately dumb tree — one directory per episode, frames as plain JPEGs:
+## Dataset Layout
 
 ```text
-<folder you picked>/
-├── meta.json                       # robot, capture_hz, image size, joint names, counts
-└── episodes/episode_00000/
-    ├── episode.json                # instruction, task, success, per-frame state/action
-    └── frames/000000.jpg …
+data/<run-id>/
+|-- meta.json
+`-- episodes/
+    `-- episode_00000/
+        |-- episode.json
+        `-- frames/
+            |-- 000000.jpg
+            `-- ...
 ```
 
-`tools/to_lerobot.py` turns that into a **LeRobotDataset v3.0**:
-
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -r tools/requirements.txt
-.venv/bin/python tools/to_lerobot.py <folder> --repo-id you/3jsvla-a1z --root ./lerobot_out
-```
-
-It drives `LeRobotDataset` itself rather than writing Parquet and MP4 by hand, so the on-disk
-format stays correct without the script having to know what it looks like — parquet shards, AV1
-video, episode offsets and normalisation stats are all lerobot's job. The result loads straight
-back:
-
-```python
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
-ds = LeRobotDataset("you/3jsvla-a1z", root="./lerobot_out")
-ds[20]["observation.images.front"]  # torch.float32 [3, 192, 256], decoded from the mp4
-ds[20]["task"]                      # "Move the red cube to the circle."
-```
-
-Two things worth knowing before you install: lerobot pins `torch<2.12` and installing it plainly
-drags in ~3 GB of CUDA libraries this converter never uses — `tools/requirements.txt` documents
-the CPU-only route, which lands at 1.7 GB instead of 5 GB. And v3.0 needs `lerobot >= 0.4.0` and
-Python >= 3.12.
-
-Episode ground truth (`object_poses`, `grasped`) is kept in the dump and ignored by the
-converter; it is there for debugging and for scoring an evaluation run, not for training.
-
-## Inverse Kinematics
-
-Scripting the arm needs IK, and the A1Z's geometry hands you a closed form. J1 takes the azimuth
-and J2/J3/J4 all turn about Y, so once the tool pitch is fixed what remains is a planar two-link
-problem. Working in the (radial, height) plane as complex numbers — where a turn of q about Y is
-a multiply by e^-iq — it solves exactly, with no iteration. `solveA1Z` in `src/main.ts` is about
-forty lines and lands the jaw on target to within a rounding error.
-
-Height costs pitch, and it costs a lot at the edge of the workspace:
-
-| Radius | Max jaw height, tool straight down | at 80° | at 70° |
-| --- | --- | --- | --- |
-| 0.30 m | 0.108 m | 0.157 m | 0.207 m |
-| 0.36 m | 0.094 m | 0.153 m | 0.212 m |
-| 0.43 m | 0.057 m | 0.131 m | 0.199 m |
-
-J4 tops out at ±75° and the wrist has no offset to make up the difference, so a far-out top-down
-grasp cannot lift its approach very high. The script therefore prefers a vertical grasp and tilts
-only as far as the reach demands, sweeping the pitch down from a steep start until every waypoint
-solves.
-
-## The Scene
-
-The desk is a real model rather than a textured box, and the room behind it is an equirectangular
-panorama used twice over: as the visible background, and — through a PMREM pass — as the scene's
-light source, so the arm picks up the colour and direction of whichever room it is standing in.
-
-**The backdrop is re-rolled every episode.** That is not decoration. A fixed background is a
-shortcut: the same wall in the same place is a free position cue, and a visual policy will use it
-instead of looking at the cubes. Training curves will not warn you — the policy scores well right
-up until the background moves. Ten panoramas ship in `public/assets/hdri/`; add or remove one by
-dropping in a `.hdr` and editing `BACKDROPS` in `src/main.ts`.
-
-The desk's work surface is at y = 0 in world terms, and its physics collider is built from the
-same numbers as its visual placement. If those drift apart, cubes float above the desktop or sink
-into it.
-
-## Physics
-
-Rapier simulates the props **and the arm**. The cubes are dynamic rigid bodies with box
-colliders, the desk is a static box, and every arm link is a rigid body carrying its own mass
-from the URDF, joined by motorised joints and wearing a convex hull built from its visual mesh.
-So the arm has to fight gravity and its own inertia, it cannot pass through the desk, and it
-shoves cubes it blunders into.
-
-Two things are worth knowing about how it is put together, because both cost real time to find.
-
-**The joints are impulse joints, not Rapier's reduced-coordinate multibody joints.** The JS
-bindings expose motors only on the former. A maximal-coordinate chain is held together by
-constraints and is softer than a reduced-coordinate one, which is the trade being made here.
-
-**A stiff motor needs a small timestep.** With a 1/120 step, the shoulder sat 26 degrees below its
-command no matter the gain — raising stiffness by 1000x barely moved it, which looks for all the
-world like a broken motor. At 1/480 the same gain tracks to about a degree. That is why
-`PHYSICS_STEP` is 1/480, and it costs four times the physics work per frame.
-
-Because the arm is driven rather than posed, `observation.joint_positions` is now what the arm
-*achieved* and `action.joint_targets` what it was *told* — a genuine state-action pair, where
-before the gap between them was a hand-rolled exponential blend standing in for inertia.
-
-### Grasping
-
-Grasping is friction. The fingers are force-limited position motors told to close *narrower* than
-the cube; they stall against it, the unreachable remainder of the command becomes contact force,
-and the cube is held by nothing but friction between two jaw plates. It can therefore slip, be
-knocked aside on approach, or be dropped. Nothing is pinned and no collision is switched off.
-
-The finger motors get a real torque cap — 30 N — because here the cap *is* the grip force, unlike
-the arm joints which get a huge one so they can hold the arm up at all.
-
-Two things this needed that are easy to get wrong:
-
-**A finger's collider is its blade, not the whole finger.** The blade sits entirely on its own
-side of the jaw, but the hinge bracket behind it reaches across the centreline. Hull the whole
-part and you get a wedge that fills the gap — the two fingers' hulls overlap, anything between
-them registers as touching both no matter how wide they are, and closing the jaws shoves the
-object rather than gripping it. The symptom was a cube riding along on fully-open jaws.
-
-**Whether something is gripped is read from contacts**, not from the command. A cube touching
-both blades is held; nothing else counts.
-
-## System Overview
+Each frame contains:
 
 ```text
-Language instruction ─┐
-Camera image ─────────┼─> VLA policy ─> Robot action ─> Three.js environment
-Robot state ──────────┘                                      │
-        ^____________________________________________________|
+timestamp
+observation.image_path
+observation.joint_positions
+observation.object_poses
+observation.grasped
+action.joint_targets
 ```
 
-Three.js provides the scene, camera, rendering, and browser interface. Simple kinematics and collision handling provide robot interaction. Python handles dataset loading, training, and model inference.
+`joint_positions` records the measured physical state. `joint_targets` records the command a policy should produce. Object poses and grasp state are ground truth for debugging and evaluation; they are not required as policy inputs.
+
+## Convert to LeRobot
+
+Create a Python environment and install the converter requirements:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python -m pip install -r tools\requirements.txt
+.venv\Scripts\python tools\to_lerobot.py data\<run-id> --repo-id you/3jsvla-a1z --root lerobot_out
+```
+
+On Linux or macOS, replace `.venv\Scripts\python` with `.venv/bin/python`.
+
+## Architecture
+
+```text
+Instruction + RGB cameras + joint state
+                    |
+                    v
+               VLA policy
+                    | action
+                    v
+Three.js renderer - Robot controller - Rapier physics
+        ^                                  |
+        `----------- observation ----------'
+```
+
+- **Three.js** renders the scene, URDF meshes, cameras, lighting, and interface.
+- **Rapier** computes arm, gripper, object, contact, and desk physics.
+- **Constrained IK/QP** plans reachable task-space waypoints.
+- **The recorder** samples RGB, state, and next-step actions at 5 Hz.
+- **Python tooling** converts browser output into a training-ready LeRobot dataset.
 
 ## Project Structure
 
 ```text
 3jsVLA/
-├── tools/
-│   ├── to_lerobot.py            # dump -> LeRobotDataset v3.0
-│   └── requirements.txt
-├── public/assets/
-│   ├── robots/a1z/              # Galaxea A1Z + G1Z URDF and STL meshes
-│   ├── robots/so101/            # SO-101 URDF and STL meshes
-│   ├── models/desk/             # the desk, glTF
-│   └── hdri/                    # ten indoor panoramas, one per episode
-├── src/
-│   ├── main.ts     # Robot table, scene, physics, arm dynamics, task, recorder
-│   └── style.css   # Collector interface
-├── index.html
-└── package.json
+|-- src/
+|   |-- main.ts             # scene, physics, task, controller, recorder
+|   |-- constrained-ik.ts   # numerical IK and constraints
+|   |-- contact-state.ts    # physical contact and grasp checks
+|   `-- style.css           # collector interface
+|-- public/assets/
+|   |-- robots/             # URDF and robot meshes
+|   |-- models/             # desk model
+|   `-- hdri/               # randomised environments
+|-- tools/
+|   |-- to_lerobot.py
+|   `-- requirements.txt
+|-- docs/
+|-- data/                   # generated runs
+|-- index.html
+`-- package.json
 ```
 
-Each downloaded episode is a JSON file containing:
+## Current Scope
 
-```text
-instruction: "Stack the green cube on the blue cube, then put the red cube on top."
-robot: "a1z"
-task: { order: ["blue", "green", "red"] }   # base, middle, top
-capture_hz: 5
-success: true
-frames[]
-├── timestamp
-├── observation.image_path        # frames/000000.jpg, or an inline data URL in the single-file form
-├── observation.joint_positions   # where the arm actually is
-├── observation.object_poses      # ground truth, for debugging and scoring
-├── observation.grasped           # which cube is in the gripper, or null
-└── action.joint_targets          # where the arm was told to go
-```
+3jsVLA is an educational simulator and data-generation project, not a validated digital twin. The scripted controller is useful for producing demonstrations, but difficult layouts can still fail because of IK reach, tracking error, collision, or unstable frictional grasping.
 
-`joint_positions` is the state and `joint_targets` is the action, and with the arm simulated they
-genuinely differ: the state is what the arm achieved, the action what it was commanded. In a
-generated episode the action is the command one capture interval ahead — what a policy would have
-to emit at that frame to produce the motion that follows.
-
-Generated episodes go to a folder as the tree above, or — where the browser cannot write to one —
-come back as a single file of the same episodes under `format: "3jsvla.dataset.v1"`.
-
-## Roadmap
-
-- [x] Create the Three.js tabletop environment
-- [x] Load and control the official A1Z + G1Z URDF model
-- [x] Record and replay joint-control demonstrations
-- [x] Simulate the props with Rapier and grasp them
-- [x] Randomise the scene and make the instruction disambiguating
-- [x] Closed-form IK and a scripted policy that generates episodes on its own
-- [x] Stream episodes to disk and convert them to LeRobotDataset v3.0
-- [x] Put the robot in a real scene and randomise the backdrop per episode
-- [x] Stack three cubes in an instructed order instead of moving one to a zone
-- [x] Simulate the arm itself, so it has mass, inertia and collision
-- [x] Replace the kinematic attach with a real friction grasp
-- [ ] Close the loop on the scripted policy so it corrects for the arm lagging its command
-- [ ] Train a small behavior-cloning policy
-- [ ] Connect the policy to the browser environment
-- [ ] Evaluate the complete closed-loop system
-
-## Design Goals
-
-- Keep every component small and understandable.
-- Make intermediate data easy to inspect.
-- Finish one complete task before adding complexity.
-- Allow the environment, robot, and model to be replaced independently.
-- Provide one tutorial for each stage of the system.
+Planned next steps are training a small behaviour-cloning policy, running inference in the browser loop, and adding repeatable evaluation metrics.
 
 ## License
 
-A license has not been selected yet.
+A project license has not been selected yet.
+

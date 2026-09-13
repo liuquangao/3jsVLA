@@ -170,7 +170,7 @@ button {
 
 .axis-mark {
   position: absolute;
-  bottom: 210px;
+  bottom: 28px;
   left: 28px;
   width: 52px;
   height: 52px;
@@ -182,13 +182,12 @@ button {
 .camera-dock {
   position: absolute;
   right: 14px;
-  bottom: 14px;
-  left: 14px;
+  top: 54px;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
-  max-width: 390px;
-  margin: 0 auto;
+  width: clamp(280px, 46vw, 360px);
+  filter: drop-shadow(0 8px 18px rgba(23, 24, 21, 0.18));
 }
 
 .camera-tile {
@@ -223,7 +222,7 @@ button {
 .camera-tile:focus-visible, .camera-orbit:focus-visible { outline: 2px solid var(--signal); outline-offset: 3px; }
 
 @media (max-width: 480px) {
-  .camera-dock { right: 8px; bottom: 8px; left: 8px; gap: 5px; }
+  .camera-dock { top: 50px; right: 8px; width: min(330px, calc(100% - 16px)); gap: 5px; }
   .camera-tile > span { padding: 6px 3px; font-size: 8px; }
   .camera-tile small { display: none; }
   .stage-label { gap: 8px; font-size: 8px; }

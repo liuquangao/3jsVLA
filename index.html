@@ -25,6 +25,7 @@
           <div id="scene" class="scene" aria-label="Three.js robot scene"></div>
           <div class="stage-label">
             <button class="camera-orbit" type="button" data-camera="orbit" aria-pressed="true">ORBIT</button>
+            <button id="collision-debug-toggle" class="camera-orbit" type="button" aria-pressed="false" title="Show actual Rapier finger collision hulls in the orbit view">GRIPPER HULL</button>
             <span id="camera-view-label">DRAG TO ORBIT / SCROLL TO ZOOM</span>
           </div>
           <div id="recording-badge" class="recording-badge" hidden>
@@ -97,6 +98,7 @@
             <div class="secondary-actions">
               <label for="generation-output">Output</label>
               <select id="generation-output" aria-label="Generation output">
+                <option value="local">Project data/</option>
                 <option value="folder">Write to folder</option>
                 <option value="download">Download JSON</option>
               </select>

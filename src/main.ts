@@ -4,6 +4,8 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
 import URDFLoader, { type URDFLink, type URDFRobot } from "urdf-loader";
+import { ConstrainedIK } from "./constrained-ik";
+import { bothFingersGrip, manifoldHasContact } from "./contact-state";
 import "./style.css";
 
 type JointValues = Record<string, number>;
@@ -89,7 +91,7 @@ type RobotSpec = {
    * and the arm is joint-slider only. `pitch` is how far the tool points below horizontal and
    * `jawAzimuth` which way the jaw opening faces, both in radians.
    */
-  solve?: (mount: Vec3, target: THREE.Vector3, pitch: number, jawAzimuth: number) => JointValues | null;
+  solve?: (mount: Vec3, target: THREE.Vector3, pitch: number, jawAzimuth: number, seed?: JointValues) => JointValues | null;
   joints: JointSpec[];
 };
 
@@ -212,16 +214,36 @@ const A1Z: RobotSpec = {
   // A top-down grasp reaches out to 0.47 m at cube height before the ±75° wrist pitch runs out.
   reach: { min: 0.27, max: 0.43, yaw: THREE.MathUtils.degToRad(55) },
   props: { cube: 0.045 },
-  solve: (mount, target, pitch, jawAzimuth) => {
+  solve: (mount, target, pitch, jawAzimuth, seed) => {
     const localTarget = target.clone().sub(new THREE.Vector3(...mount))
       .applyAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2);
-    return solveA1Z([0, 0, 0], localTarget, pitch, jawAzimuth + Math.PI / 2);
+    const analyticSeed = solveA1Z([0, 0, 0], localTarget, pitch, jawAzimuth + Math.PI / 2);
+    const preferred = seed ?? currentValues;
+    const radialYaw = Math.atan2(-(target.z - mount[2]), target.x - mount[0]);
+    const forward = new THREE.Vector3(
+      Math.cos(radialYaw) * Math.cos(pitch), -Math.sin(pitch), -Math.sin(radialYaw) * Math.cos(pitch),
+    ).normalize();
+    // A square cube permits four equivalent jaw orientations. Try the one closest
+    // to the seed first, instead of forcing a wrist flip at a symmetry boundary.
+    const reference = constrainedIK!.forwardPose(preferred).rotation;
+    const orientations = [0, 1, 2, 3].map((quarter) => {
+      const yaw = jawAzimuth + quarter * Math.PI / 2;
+      const opening = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+      opening.addScaledVector(forward, -opening.dot(forward)).normalize();
+      const up = new THREE.Vector3().crossVectors(forward, opening).normalize();
+      return new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(forward, opening, up));
+    }).sort((a, b) => a.angleTo(reference) - b.angleTo(reference));
+    for (const orientation of orientations) {
+      const solution = constrainedIK!.solve(target, orientation, analyticSeed ? [preferred, analyticSeed] : [preferred]);
+      if (solution) return solution;
+    }
+    return null;
   },
   joints: [
     { name: "arm_joint1", label: "J1 base yaw", min: -120, max: 120, initial: 0, unit: "deg", urdfJoints: ["arm_joint1"], toURDF: revolute, fromURDF: measured },
-    { name: "arm_joint2", label: "J2 shoulder", min: 0, max: 180, initial: 100, unit: "deg", urdfJoints: ["arm_joint2"], toURDF: revolute, fromURDF: measured },
-    { name: "arm_joint3", label: "J3 elbow", min: -180, max: 0, initial: -100, unit: "deg", urdfJoints: ["arm_joint3"], toURDF: revolute, fromURDF: measured },
-    { name: "arm_joint4", label: "J4 wrist pitch", min: -75, max: 75, initial: 55, unit: "deg", urdfJoints: ["arm_joint4"], toURDF: revolute, fromURDF: measured },
+    { name: "arm_joint2", label: "J2 shoulder", min: 0, max: 180, initial: 0, unit: "deg", urdfJoints: ["arm_joint2"], toURDF: revolute, fromURDF: measured },
+    { name: "arm_joint3", label: "J3 elbow", min: -180, max: 0, initial: 0, unit: "deg", urdfJoints: ["arm_joint3"], toURDF: revolute, fromURDF: measured },
+    { name: "arm_joint4", label: "J4 wrist pitch", min: -75, max: 75, initial: 0, unit: "deg", urdfJoints: ["arm_joint4"], toURDF: revolute, fromURDF: measured },
     { name: "arm_joint5", label: "J5 wrist yaw", min: -85, max: 85, initial: 0, unit: "deg", urdfJoints: ["arm_joint5"], toURDF: revolute, fromURDF: measured },
     { name: "arm_joint6", label: "J6 wrist roll", min: -115, max: 115, initial: 0, unit: "deg", urdfJoints: ["arm_joint6"], toURDF: revolute, fromURDF: measured },
     {
@@ -352,8 +374,11 @@ type Prop = {
   body: RAPIER.RigidBody;
   collider: RAPIER.Collider;
 };
-/** Bottom, middle and top of the stack the instruction asks for. */
-type Task = { order: [PropId, PropId, PropId]; instruction: string };
+type Task = {
+  target: PropId;
+  region: { shape: "circle"; color: "yellow"; center: [number, number]; radius: number };
+  instruction: string;
+};
 
 const sceneElement = document.querySelector<HTMLDivElement>("#scene")!;
 const controlsElement = document.querySelector<HTMLDivElement>("#joint-controls")!;
@@ -385,16 +410,23 @@ const measuredValues = { ...initialValues };
 const sliders = new Map<string, HTMLInputElement>();
 const valueLabels = new Map<string, HTMLElement>();
 
-let task: Task = { order: ["red", "green", "blue"], instruction: "" };
+let task: Task = {
+  target: "red",
+  region: { shape: "circle", color: "yellow", center: [0, 0], radius: 0.075 },
+  instruction: "",
+};
 let frames: EpisodeFrame[] = [];
 let dataset: Array<ReturnType<typeof buildEpisode>> = [];
 let script: {
   plan: Script;
   time: number;
   tick: number;
+  /** Wall-clock guard against a simulation or capture step getting stuck. */
+  startedAt: number;
   /** Which leg of the stack is running, and how much episode time the earlier legs used. */
   stage: number;
   clock: number;
+  wait?: number;
 } | null = null;
 let generation: {
   requested: number;
@@ -523,11 +555,14 @@ function useBackdrop(index: number) {
 
 function renderObservationView(view: THREE.Camera) {
   const mainEnvironment = scene.environment;
+  const debugVisible = colliderDebug.visible;
   try {
+    colliderDebug.visible = false;
     scene.environment = observationEnvironment;
     observationRenderer.render(scene, view);
   } finally {
     scene.environment = mainEnvironment;
+    colliderDebug.visible = debugVisible;
   }
 }
 
@@ -536,6 +571,13 @@ await RAPIER.init();
 const physics = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
 physics.timestep = PHYSICS_STEP;
 physics.numSolverIterations = 8;
+// Rapier 0.20 defaults to a 20 mm prediction band. At this gripper's scale it
+// creates corner contacts far before touch, resisting a clear vertical descent.
+physics.integrationParameters.normalizedPredictionDistance = 0.0005;
+physics.integrationParameters.normalizedAllowedLinearError = 0.00005;
+// Stiff contacts keep force-limited fingers on the cube surface instead of
+// allowing several millimetres of compression under the commanded grip force.
+physics.integrationParameters.contact_natural_frequency = 240;
 
 // A slab whose top face sits exactly on y = 0. A box is the right collider for a flat desktop —
 // the drawers and legs below it are never touched, so they need no geometry.
@@ -574,6 +616,23 @@ const props: Prop[] = PROP_SPECS.map((propSpec) => {
 
   return { ...propSpec, mesh, body, collider };
 });
+
+const TARGET_RADIUS = Math.max(0.07, spec.props.cube * 1.65);
+const targetZone = new THREE.Group();
+targetZone.name = "target-zone";
+const targetDisk = new THREE.Mesh(
+  new THREE.CircleGeometry(TARGET_RADIUS, 48),
+  new THREE.MeshBasicMaterial({ color: 0xe6bb42, transparent: true, opacity: 0.34, depthWrite: false }),
+);
+targetDisk.rotation.x = -Math.PI / 2;
+const targetRing = new THREE.Mesh(
+  new THREE.RingGeometry(TARGET_RADIUS - 0.004, TARGET_RADIUS, 48),
+  new THREE.MeshBasicMaterial({ color: 0x9d6f00, side: THREE.DoubleSide }),
+);
+targetRing.rotation.x = -Math.PI / 2;
+targetRing.position.y = 0.0005;
+targetZone.add(targetDisk, targetRing);
+scene.add(targetZone);
 
 // urdf-loader resolves loadAsync as soon as the XML is parsed, while the STL meshes are
 // still in flight on the loading manager. Wait for the manager to drain, or the robot is
@@ -646,18 +705,81 @@ let physicsAccumulator = 0;
 let gripped: Prop | null = null;
 let grippedReport: Prop | null = null;
 
-/** True when the two colliders have at least one live contact point. */
-function touching(a: RAPIER.Collider, b: RAPIER.Collider) {
+/** Separated manifold points are not contact; gripping additionally requires force. */
+function touching(a: RAPIER.Collider, b: RAPIER.Collider, requireForce = false) {
+  // A cached manifold can retain points/normals from the start of an approach.
+  // First require the current convex shapes themselves to be touching.
+  if (!a.contactCollider(b, 0.0001)) return false;
   let hit = false;
-  physics.contactPair(a, b, (manifold) => {
-    if (manifold.numContacts() > 0) hit = true;
+  physics.contactPair(a, b, (manifold, flipped) => {
+    const first = flipped ? b : a;
+    const second = flipped ? a : b;
+    const p1 = first.translation(), p2 = second.translation();
+    const r1 = first.rotation(), r2 = second.rotation();
+    const q1 = new THREE.Quaternion(r1.x, r1.y, r1.z, r1.w);
+    const q2 = new THREE.Quaternion(r2.x, r2.y, r2.z, r2.w);
+    const localNormal = manifold.localNormal1();
+    const normal = new THREE.Vector3(localNormal.x, localNormal.y, localNormal.z).applyQuaternion(q1);
+    if (manifoldHasContact(manifold, requireForce, (index) => {
+      const local1 = manifold.localContactPoint1(index);
+      const local2 = manifold.localContactPoint2(index);
+      if (!local1 || !local2) return Infinity;
+      const world1 = new THREE.Vector3(local1.x, local1.y, local1.z).applyQuaternion(q1).add(new THREE.Vector3(p1.x, p1.y, p1.z));
+      const world2 = new THREE.Vector3(local2.x, local2.y, local2.z).applyQuaternion(q2).add(new THREE.Vector3(p2.x, p2.y, p2.z));
+      return world2.sub(world1).dot(normal);
+    })) hit = true;
   });
   return hit;
 }
 
+function contactAndMotorDiagnostic() {
+  const contacts: unknown[] = [];
+  for (const prop of props) {
+    fingerColliders.forEach((finger, fingerIndex) => {
+      physics.contactPair(prop.collider, finger, (manifold) => {
+        contacts.push({
+          prop: prop.id,
+          finger: fingerIndex,
+          currentDistanceMm: prop.collider.contactCollider(finger, 0.05)?.distance !== undefined
+            ? prop.collider.contactCollider(finger, 0.05)!.distance * 1000 : null,
+          distancesMm: Array.from({ length: manifold.numContacts() }, (_, i) => manifold.contactDist(i) * 1000),
+          impulsesNs: Array.from({ length: manifold.numContacts() }, (_, i) => manifold.contactImpulse(i)),
+          solverDistancesMm: Array.from({ length: manifold.numSolverContacts() }, (_, i) => manifold.solverContactDist(i) * 1000),
+        });
+      });
+    });
+  }
+  const shoulder = armJoints?.get("arm_joint2");
+  if (!shoulder) return { contacts };
+  const rotation = shoulder.parent.rotation();
+  const q = new THREE.Quaternion(rotation.x, rotation.y, rotation.z, rotation.w);
+  const at = shoulder.parent.translation();
+  const anchor = shoulder.anchor.clone().applyQuaternion(q).add(new THREE.Vector3(at.x, at.y, at.z));
+  const axis = shoulder.axis.clone().applyQuaternion(q).normalize();
+  const gravityTorque = shoulder.load.reduce((sum, body) => {
+    const com = body.worldCom();
+    return sum + new THREE.Vector3(com.x, com.y, com.z).sub(anchor)
+      .cross(new THREE.Vector3(0, -9.81 * body.mass(), 0)).dot(axis);
+  }, 0);
+  const compensation = THREE.MathUtils.clamp(-gravityTorque, -shoulder.maxEffort, shoulder.maxEffort);
+  return {
+    contacts,
+    shoulder: {
+      gravityTorqueNm: gravityTorque,
+      compensationNm: compensation,
+      motorHeadroomNm: Math.max(0, shoulder.maxEffort - Math.abs(compensation)),
+      effortLimitNm: shoulder.maxEffort,
+      gains: shoulder.gains,
+      proportionalTorqueNm: shoulder.gains[0] * revolute(currentValues.arm_joint2 - measuredValues.arm_joint2),
+      carriedMassKg: shoulder.load.reduce((sum, body) => sum + body.mass(), 0),
+      loadBodies: shoulder.load.length,
+    },
+  };
+}
+
 function findGrippedProp() {
   if (fingerColliders.length < 2) return null;
-  return props.find((prop) => fingerColliders.every((finger) => touching(prop.collider, finger))) ?? null;
+  return props.find((prop) => bothFingersGrip(fingerColliders.map((finger) => touching(prop.collider, finger, true)))) ?? null;
 }
 
 function updateGrasp() {
@@ -740,6 +862,10 @@ type ArmJoint = {
   prismatic: boolean;
   gains: [number, number];
   maxEffort: number;
+  target: number;
+  trim: number;
+  lower: number;
+  upper: number;
   /** Every body this joint carries — its child and everything beyond it. */
   load: RAPIER.RigidBody[];
 };
@@ -934,7 +1060,10 @@ function buildArmDynamics() {
     gather(childLink);
 
     const gains = prismatic ? GRIPPER_MOTOR_GAINS : (ARM_MOTOR_GAINS[name] ?? [30, 1]);
-    joints.set(name, { joint, parent, child, axis, anchor, prismatic, load, gains, maxEffort });
+    joints.set(name, {
+      joint, parent, child, axis, anchor, prismatic, load, gains, maxEffort,
+      target: 0, trim: 0, lower: urdfJoint.limit.lower, upper: urdfJoint.limit.upper,
+    });
   }
 
   // This light-link serial chain needs more iterations than independent props. The headless
@@ -945,6 +1074,56 @@ function buildArmDynamics() {
 
 const IDENTITY = new THREE.Quaternion();
 const armJoints = buildArmDynamics();
+
+// Draw the solver's actual collision geometry, not another approximation of the STL.
+const colliderDebug = new THREE.LineSegments(
+  new THREE.BufferGeometry(),
+  new THREE.LineBasicMaterial({ color: 0xff9b22, depthTest: false, depthWrite: false, toneMapped: false }),
+);
+colliderDebug.name = "gripper-collision-debug";
+colliderDebug.frustumCulled = false;
+colliderDebug.renderOrder = 1000;
+colliderDebug.visible = false;
+scene.add(colliderDebug);
+let showColliderDebug = false;
+const collisionDebugButton = document.querySelector<HTMLButtonElement>("#collision-debug-toggle")!;
+collisionDebugButton.addEventListener("click", () => {
+  showColliderDebug = !showColliderDebug;
+  collisionDebugButton.setAttribute("aria-pressed", String(showColliderDebug));
+  collisionDebugButton.textContent = showColliderDebug ? "GRIPPER HULL ON" : "GRIPPER HULL";
+});
+
+function updateColliderDebug() {
+  colliderDebug.visible = showColliderDebug && activeView === "orbit";
+  if (!colliderDebug.visible) return;
+  const handles = new Set(fingerColliders.map((collider) => collider.handle));
+  const { vertices } = physics.debugRender(undefined, (collider) => handles.has(collider.handle));
+  const attribute = colliderDebug.geometry.getAttribute("position");
+  if (!attribute || attribute.array.length !== vertices.length) {
+    colliderDebug.geometry.dispose();
+    colliderDebug.geometry = new THREE.BufferGeometry();
+    colliderDebug.geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(vertices), 3));
+  } else {
+    attribute.array.set(vertices);
+    attribute.needsUpdate = true;
+  }
+}
+
+// Capture zero-pose joint origins before recording or commanding any joint angles.
+const constrainedIK = spec.id === "a1z" ? new ConstrainedIK(
+  robot.matrixWorld.clone(),
+  JOINTS.filter((control) => control.unit === "deg").map((control) => {
+    const joint = robot.joints[control.urdfJoints[0]];
+    return {
+      name: control.name,
+      origin: new THREE.Matrix4().compose(joint.position, joint.quaternion, new THREE.Vector3(1, 1, 1)),
+      axis: joint.axis.clone().normalize(),
+      min: Math.max(revolute(control.min), joint.limit.lower),
+      max: Math.min(revolute(control.max), joint.limit.upper),
+    };
+  }),
+  new THREE.Vector3(A1Z_JAW_ANCHOR, 0, 0),
+) : null;
 
 const parentRotation = new THREE.Quaternion();
 const childRotation = new THREE.Quaternion();
@@ -1000,7 +1179,43 @@ function applyGravityCompensation() {
     entry.child.addTorque(torque, false);
     torque.negate();
     entry.parent.addTorque(torque, false);
+    updateMotorTrim(entry, Math.max(0, entry.maxEffort - Math.abs(compensation)));
   }
+}
+
+/** Slow, bounded integral correction of steady joint error, separate from task targets.
+ * Only integrate near the target and at low joint speed. Do not accumulate further
+ * into a joint limit or beyond the remaining motor torque budget.
+ */
+function updateMotorTrim(entry: ArmJoint, headroom: number) {
+  const actual = measureJoint(entry);
+  const error = entry.target - actual;
+  const parentVelocity = entry.parent.angvel();
+  const childVelocity = entry.child.angvel();
+  // axisWorld was computed from this joint's parent by applyGravityCompensation.
+  const speed = (childVelocity.x - parentVelocity.x) * axisWorld.x
+    + (childVelocity.y - parentVelocity.y) * axisWorld.y
+    + (childVelocity.z - parentVelocity.z) * axisWorld.z;
+  const limit = revolute(3);
+  if (Math.abs(error) < revolute(5) && Math.abs(speed) < revolute(10)) {
+    const candidate = THREE.MathUtils.clamp(entry.trim + error * 1.2 * PHYSICS_STEP, -limit, limit);
+    const requested = entry.target + candidate;
+    const bounded = THREE.MathUtils.clamp(requested, entry.lower, entry.upper);
+    const effort = entry.gains[0] * (bounded - actual) - entry.gains[1] * speed;
+    const previousEffort = entry.gains[0] * (entry.target + entry.trim - actual) - entry.gains[1] * speed;
+    if (requested === bounded &&
+        (Math.abs(effort) <= headroom || Math.abs(effort) < Math.abs(previousEffort))) {
+      entry.trim = candidate;
+    }
+  }
+  entry.joint.configureMotorPosition(
+    THREE.MathUtils.clamp(entry.target + entry.trim, entry.lower, entry.upper),
+    entry.gains[0], entry.gains[1],
+  );
+}
+
+function clearMotorTrims() {
+  if (armJoints) for (const entry of armJoints.values()) entry.trim = 0;
 }
 
 /** Reads a joint's actual position back out of the solver, in URDF units. */
@@ -1035,8 +1250,10 @@ function commandArm(values: JointValues) {
     const target = control.toURDF(values[control.name]);
     for (const name of control.urdfJoints) {
       const entry = armJoints.get(name);
-      entry?.joint.configureMotorPosition(
-        target,
+      if (!entry) continue;
+      entry.target = THREE.MathUtils.clamp(target, entry.lower, entry.upper);
+      entry.joint.configureMotorPosition(
+        THREE.MathUtils.clamp(entry.target + entry.trim, entry.lower, entry.upper),
         entry.gains[0],
         entry.gains[1],
       );
@@ -1065,6 +1282,7 @@ function setURDFJoint(robotModel: URDFRobot, joint: JointSpec, value: number) {
 
 /** Reset both worlds together; do not accelerate the arm from its old pose at episode start. */
 function resetArmPhysics(values: JointValues) {
+  clearMotorTrims();
   for (const control of JOINTS) setURDFJoint(robot, control, values[control.name]);
   robot.updateMatrixWorld(true);
   const position = new THREE.Vector3();
@@ -1355,7 +1573,7 @@ function buildEpisode() {
     format: "3jsvla.episode.v2",
     robot: spec.id,
     instruction: instructionElement.value.trim(),
-    task: { order: task.order },
+    task: { target: task.target, region: task.region },
     capture_hz: CAPTURE_HZ,
     success: taskSucceeded(),
     created_at: new Date().toISOString(),
@@ -1392,24 +1610,17 @@ function downloadDataset() {
   statusElement.textContent = `DATASET DOWNLOADED — ${dataset.length} EPISODES`;
 }
 
-/**
- * A random ordering of the three cubes into a stack. The instruction is the only thing that says
- * which cube goes where, and the order matters — build it wrong and the stack is wrong even
- * though every cube was moved. Six permutations share the same visual scene, so a policy that
- * ignores the language cannot do better than chance.
- */
-function rollTask(): Task {
-  const shuffled = [...PROP_SPECS];
-  for (let i = shuffled.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-  }
-  const [base, middle, top] = shuffled;
+function rollTask(center: THREE.Vector2): Task {
+  const target = PROP_SPECS[Math.floor(Math.random() * PROP_SPECS.length)];
+  const instructions = [
+    `Move the ${target.label} cube into the yellow target circle.`,
+    `Place the ${target.label} cube inside the yellow circle.`,
+    `Pick up the ${target.label} block and put it in the yellow target area.`,
+  ];
   return {
-    order: [base.id, middle.id, top.id],
-    instruction:
-      `Stack the ${middle.label} cube on the ${base.label} cube, ` +
-      `then put the ${top.label} cube on top.`,
+    target: target.id,
+    region: { shape: "circle", color: "yellow", center: [center.x, center.y], radius: TARGET_RADIUS },
+    instruction: instructions[Math.floor(Math.random() * instructions.length)],
   };
 }
 
@@ -1491,7 +1702,8 @@ function sampleLayout() {
     if (!placement) return null;
     taken.push(placement);
   }
-  return taken;
+  const target = samplePlacement(taken, TARGET_RADIUS);
+  return target ? { props: taken, target } : null;
 }
 
 function newEpisode() {
@@ -1502,10 +1714,10 @@ function newEpisode() {
   for (let retry = 0; !layout && retry < 20; retry += 1) layout = sampleLayout();
   if (!layout) {
     statusElement.textContent = "NO VISIBLE RIGHT-SIDE LAYOUT FOUND - ADJUST CENTER CAMERA OR REACH";
-    return;
+    return false;
   }
 
-  const spots = layout.map((placement) => placement.at);
+  const spots = layout.props.map((placement) => placement.at);
   props.forEach((prop, index) => {
     const spot = spots[index];
     prop.body.setTranslation({ x: spot.x, y: spec.props.cube / 2, z: spot.y }, true);
@@ -1518,11 +1730,12 @@ function newEpisode() {
   });
 
   syncPropMeshes();
+  targetZone.position.set(layout.target.at.x, 0.001, layout.target.at.y);
   // A fixed backdrop is a shortcut: the same wall in the same place is a free position cue, and
   // a policy will happily use it instead of looking at the cubes. Re-rolling it per episode
   // forces the visual encoder onto the desk and the props.
   useBackdrop(Math.floor(Math.random() * backdrops.length));
-  task = rollTask();
+  task = rollTask(layout.target.at);
   instructionElement.value = task.instruction;
   frames = [];
   replayButton.disabled = true;
@@ -1532,36 +1745,35 @@ function newEpisode() {
   // generating, where the episode's own first capture lands a frame a moment later anyway.
   if (!generation) previewElement.src = renderObservation();
   statusElement.textContent = "NEW TASK — adjust a joint, then start recording";
+  return true;
 }
 
-/**
- * Done when the three cubes are stacked in the order the instruction named, at rest and nothing
- * held. Physics decides this, not a region test: each cube has to actually be sitting at its
- * level and lined up over the base, so a knocked-over or badly aimed stack simply fails.
- */
 function taskSucceeded() {
   if (gripped) return false;
   const cube = spec.props.cube;
-  const stack = task.order.map((id) => props.find((entry) => entry.id === id)!);
-  const base = stack[0].mesh.position;
-
-  return stack.every((prop, level) => {
-    const at = prop.mesh.position;
-    if (Math.abs(at.y - (level + 0.5) * cube) > cube * 0.35) return false;
-    if (Math.hypot(at.x - base.x, at.z - base.z) > cube * 0.6) return false;
-    const velocity = prop.body.linvel();
-    return Math.hypot(velocity.x, velocity.y, velocity.z) <= 0.03;
-  });
+  const prop = props.find((entry) => entry.id === task.target)!;
+  const [x, z] = task.region.center;
+  const fullyInside = Math.hypot(prop.mesh.position.x - x, prop.mesh.position.z - z)
+    <= task.region.radius - cube * Math.SQRT2 / 2;
+  const onTable = Math.abs(prop.mesh.position.y - cube / 2) <= cube * 0.2;
+  const velocity = prop.body.linvel();
+  return fullyInside && onTable && Math.hypot(velocity.x, velocity.y, velocity.z) <= 0.03;
 }
 
 function updateTaskState() {
   const done = taskSucceeded();
-  taskStateElement.textContent = done ? "Stacked" : "Not stacked";
+  taskStateElement.textContent = done ? "In target" : "Not in target";
   taskStateElement.classList.toggle("is-success", done);
 }
 
 /** One leg of the scripted trajectory: ease to `pose` over `duration` seconds. */
-type ScriptStep = { pose: JointValues; duration: number };
+type ScriptStep = {
+  pose: JointValues;
+  duration: number;
+  cartesian?: { from: THREE.Vector3; to: THREE.Vector3; pitch: number; azimuth: number; gripper: number };
+  gripHold?: { target: PropId; min: number; max: number };
+  completion?: "joint";
+};
 type Script = { steps: ScriptStep[]; start: JointValues; total: number };
 
 // Demonstration speed, not the arm's limit. At 5 Hz capture this puts roughly 6 degrees
@@ -1578,78 +1790,54 @@ function stepDuration(from: JointValues, to: JointValues) {
   return seconds;
 }
 
-/** An episode is two of these: middle cube onto the base, then top cube onto the pair. */
-const STACK_STAGES = 2;
-
-/**
- * Waypoints for one leg: fetch `sourceId` and set it down centred on the base cube at `level`
- * (1 sits on the base, 2 sits on the pair). Positions are read live from the physics bodies, so
- * planning the second leg after the first has landed absorbs whatever the base drifted.
- *
- * Every leg re-rolls the approach pitch, hover height and a little aim error, so a batch is a
- * spread of demonstrations rather than one motion repeated. Placement jitter is deliberately far
- * tighter than the pick jitter: a few millimetres off and the stack topples, which is the whole
- * difference between this task and dropping a cube in a wide zone.
- */
-function buildStage(sourceId: PropId, level: number): Script | null {
+function buildTransfer(sourceId: PropId, destination: THREE.Vector2): Script | null {
   if (!spec.solve) return null;
   const source = props.find((entry) => entry.id === sourceId)!;
-  const base = props.find((entry) => entry.id === task.order[0])!;
   const cube = spec.props.cube;
 
-  const jitter = (spread: number) => (Math.random() - 0.5) * spread;
   const sourceAt = source.body.translation();
-  const baseAt = base.body.translation();
   const sourceYaw = new THREE.Euler().setFromQuaternion(source.mesh.quaternion, "YXZ").y;
-  const baseYaw = new THREE.Euler().setFromQuaternion(base.mesh.quaternion, "YXZ").y;
 
-  const grasp = new THREE.Vector3(sourceAt.x + jitter(0.008), cube / 2, sourceAt.z + jitter(0.008));
+  const grasp = new THREE.Vector3(sourceAt.x, sourceAt.y, sourceAt.z);
   const place = new THREE.Vector3(
-    baseAt.x + jitter(0.005),
-    (level + 0.5) * cube + THREE.MathUtils.lerp(0.003, 0.010, Math.random()),
-    baseAt.z + jitter(0.005),
+    destination.x,
+    cube / 2 + 0.002,
+    destination.y,
   );
 
-  // Height costs pitch: straight down the jaw only clears 57 mm at the far edge of the workspace
-  // but 199 mm at 70 degrees, and carrying over a growing stack needs real height. So prefer a
-  // vertical grasp and give up pitch, then hover, only as far as the reach demands.
-  const firstPitch = THREE.MathUtils.lerp(82, 90, Math.random());
-  const firstHover = THREE.MathUtils.lerp(0.075, 0.12, Math.random());
-
-  const plan = ((): Array<{ pose: JointValues; hold?: number }> | null => {
-    for (let hover = firstHover; hover >= 0.05; hover -= 0.015) {
-      // Clear the existing stack during transit, not just the cube being picked up.
-      const transit = level * cube + hover;
-      const overSource = grasp.clone().setY(Math.max(cube / 2 + hover, transit));
-      const overPlace = place.clone().setY(transit + cube / 2);
-
-      for (let pitchDeg = firstPitch; pitchDeg >= 58; pitchDeg -= 4) {
-        const pitch = revolute(pitchDeg);
-        const at = (point: THREE.Vector3, azimuth: number, gripper: number) => {
-          const solution = spec.solve!(spec.mount, point, pitch, azimuth);
+  const plan = ((): Array<{ pose: JointValues; hold?: number; gripHold?: ScriptStep["gripHold"]; completion?: ScriptStep["completion"] }> | null => {
+    // Keep the lateral transfer clearly above the cubes, while retaining lower
+    // fallbacks for targets near the edge of the reachable workspace.
+    for (let hover = 0.065; hover >= 0.0475; hover -= 0.00875) {
+      const overSource = grasp.clone().setY(grasp.y + hover);
+      const overPlace = place.clone().setY(place.y + hover);
+      const pitch = Math.PI / 2;
+        let ikSeed = { ...currentValues };
+        const at = (point: THREE.Vector3, gripper: number) => {
+          const solution = spec.solve!(spec.mount, point, pitch, sourceYaw, ikSeed);
+          if (solution) ikSeed = solution;
           return solution ? { ...solution, gripper } : null;
         };
         // Hold poses to let the jaws establish contact and placed cubes settle.
-        const attempt: Array<{ pose: JointValues | null; hold?: number }> = [
-          { pose: at(overSource, sourceYaw, GRIPPER_OPEN) },
-          { pose: at(grasp, sourceYaw, GRIPPER_OPEN) },
-          { pose: at(grasp, sourceYaw, GRIPPER_SHUT) },
-          { pose: at(grasp, sourceYaw, GRIPPER_SHUT), hold: 0.7 },
-          { pose: at(overSource, sourceYaw, GRIPPER_SHUT) },
-          { pose: at(overPlace, baseYaw, GRIPPER_SHUT) },
-          { pose: at(place, baseYaw, GRIPPER_SHUT) },
-          { pose: at(place, baseYaw, GRIPPER_SHUT), hold: 0.7 },
-          { pose: at(place, baseYaw, GRIPPER_OPEN) },
-          { pose: at(place, baseYaw, GRIPPER_OPEN), hold: 0.7 },
-          { pose: at(overPlace, baseYaw, GRIPPER_OPEN) },
-          // The arm lags its command now, so without a beat here the leg can end with the jaws
-          // still around the cube they just placed — a finished stack that scores as a failure.
-          { pose: at(overPlace, baseYaw, GRIPPER_OPEN), hold: 0.8 },
+        const attempt: Array<{ pose: JointValues | null; hold?: number; gripHold?: ScriptStep["gripHold"]; completion?: ScriptStep["completion"] }> = [
+          { pose: at(overSource, GRIPPER_OPEN) },
+          { pose: at(grasp, GRIPPER_OPEN) },
+          { pose: at(grasp, GRIPPER_SHUT) },
+          { pose: at(grasp, GRIPPER_SHUT), hold: 0.8, gripHold: { target: sourceId, min: 0.15, max: 0.8 } },
+          { pose: at(overSource, GRIPPER_SHUT) },
+          { pose: at(overPlace, GRIPPER_SHUT) },
+          { pose: at(place, GRIPPER_SHUT) },
+          { pose: at(place, GRIPPER_SHUT), hold: 0.6 },
+          { pose: at(place, GRIPPER_OPEN) },
+          { pose: at(place, GRIPPER_OPEN), hold: 0.8 },
+          { pose: at(overPlace, GRIPPER_OPEN) },
+          { pose: at(overPlace, GRIPPER_OPEN), hold: 0.5 },
+          // End every completed demonstration in the same neutral state it began in.
+          { pose: { ...initialValues }, completion: "joint" },
         ];
         if (attempt.every((entry) => entry.pose !== null)) {
-          return attempt as Array<{ pose: JointValues; hold?: number }>;
+          return attempt as Array<{ pose: JointValues; hold?: number; gripHold?: ScriptStep["gripHold"]; completion?: ScriptStep["completion"] }>;
         }
-      }
     }
     return null;
   })();
@@ -1663,9 +1851,35 @@ function buildStage(sourceId: PropId, level: number): Script | null {
     const duration = entry.hold ?? stepDuration(previous, pose);
     previous = pose;
     total += duration;
-    return { pose, duration };
+    return { pose, duration, gripHold: entry.gripHold, completion: entry.completion };
   });
-  return { steps, start, total };
+  // Keep each vertical approach/retraction straight in task space. Joint interpolation
+  // between two valid IK solutions otherwise sweeps the fingers sideways into the cube.
+  const tcpAt = (pose: JointValues) => {
+    return constrainedIK!.forwardPose(pose).position;
+  };
+  const trajectory: ScriptStep[] = steps;
+  for (const index of [1, 4, 6, 10]) {
+    const from = tcpAt(steps[index - 1].pose);
+    const to = tcpAt(steps[index].pose);
+    const azimuth = sourceYaw;
+    const gripper = steps[index].pose.gripper;
+    const toolForward = new THREE.Vector3(1, 0, 0)
+      .applyQuaternion(constrainedIK!.forwardPose(steps[index].pose).rotation);
+    const pitch = Math.asin(THREE.MathUtils.clamp(-toolForward.y, -1, 1));
+    // Reject paths with unreachable intermediate points before starting the motion.
+    let pathSeed = steps[index - 1].pose;
+    for (let sample = 0; sample <= 20; sample += 1) {
+      const solution = spec.solve(spec.mount, from.clone().lerp(to, sample / 20), pitch, azimuth, pathSeed);
+      if (!solution) return null;
+      pathSeed = solution;
+    }
+    trajectory[index].cartesian = { from, to, pitch, azimuth, gripper };
+    const duration = Math.max(steps[index].duration, from.distanceTo(to) / 0.025);
+    total += duration - steps[index].duration;
+    steps[index].duration = duration;
+  }
+  return { steps: trajectory, start, total };
 }
 
 /** The commanded pose at a point in the script, eased between waypoints. */
@@ -1675,6 +1889,12 @@ function poseAt(script: Script, time: number): JointValues {
   for (const step of script.steps) {
     if (time < clock + step.duration) {
       const alpha = THREE.MathUtils.smoothstep((time - clock) / step.duration, 0, 1);
+      if (step.cartesian) {
+        const { from, to, pitch, azimuth, gripper } = step.cartesian;
+        const solution = spec.solve!(spec.mount, from.clone().lerp(to, alpha), pitch, azimuth, currentValues);
+        if (!solution) throw new Error("Cartesian grasp path became unreachable");
+        return { ...solution, gripper };
+      }
       const pose: JointValues = {};
       for (const joint of JOINTS) {
         pose[joint.name] = THREE.MathUtils.lerp(previous[joint.name], step.pose[joint.name], alpha);
@@ -1712,11 +1932,34 @@ declare global {
 type DiskWriter = {
   root: FileSystemDirectoryHandle;
   episodes: FileSystemDirectoryHandle;
+} | {
+  root: { name: string };
+  localRun: string;
 };
 
 let writer: DiskWriter | null = null;
 
 const canWriteToDisk = () => "showDirectoryPicker" in window;
+
+async function postDataset(route: string, payload: unknown) {
+  const response = await fetch(`/__dataset/${route}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error ?? "Dataset write failed");
+  return result;
+}
+
+async function writeMetadata(contents: string) {
+  const destination = writer!;
+  if ("localRun" in destination) {
+    await postDataset("meta", { run: destination.localRun, meta: JSON.parse(contents) });
+  } else {
+    await writeFile(destination.root, "meta.json", contents);
+  }
+}
 
 /** JPEG data URL to bytes, so a frame can be written without a round trip through base64. */
 function dataUrlToBlob(dataUrl: string) {
@@ -1735,8 +1978,13 @@ async function writeFile(directory: FileSystemDirectoryHandle, name: string, con
 
 /** Writes one episode as its own directory: the frames as JPEGs, everything else as JSON. */
 async function writeEpisode(episode: ReturnType<typeof buildEpisode>, index: number) {
+  const destination = writer!;
+  if ("localRun" in destination) {
+    await postDataset("episode", { run: destination.localRun, index, episode });
+    return;
+  }
   const name = `episode_${String(index).padStart(5, "0")}`;
-  const directory = await writer!.episodes.getDirectoryHandle(name, { create: true });
+  const directory = await destination.episodes.getDirectoryHandle(name, { create: true });
   const frameDirectory = await directory.getDirectoryHandle("frames", { create: true });
 
   const record = {
@@ -1754,9 +2002,7 @@ async function writeEpisode(episode: ReturnType<typeof buildEpisode>, index: num
 }
 
 async function writeDatasetMeta(summary: { completed: number; succeeded: number }) {
-  await writeFile(
-    writer!.root,
-    "meta.json",
+  await writeMetadata(
     JSON.stringify(
       {
         format: "3jsvla.dump.v1",
@@ -1782,15 +2028,16 @@ const GENERATION_DT = PHYSICS_STEP * 2;
 const TICKS_PER_CAPTURE = Math.round(1 / (CAPTURE_HZ * GENERATION_DT));
 /** Ticks are processed in slices, so the page keeps rendering and you can watch it collect. */
 const GENERATION_BUDGET_MS = 8;
+const EPISODE_TIMEOUT_MS = 60_000;
 
 function startGeneratedEpisode() {
   for (let attempt = 0; attempt < 8; attempt += 1) {
-    newEpisode();
-    const plan = buildStage(task.order[1], 1);
-    // Check the second leg is reachable too before committing to the layout — the stack sits
-    // where the base already is, so it can be planned now even though it is re-planned later.
-    if (plan && buildStage(task.order[2], 2)) {
-      script = { plan, time: 0, tick: 0, stage: 0, clock: 0 };
+    // A failed layout must never fall through to planning with the previous
+    // task and frame buffer, otherwise consecutive episodes become duplicates.
+    if (!newEpisode()) continue;
+    const plan = buildTransfer(task.target, new THREE.Vector2(...task.region.center));
+    if (plan) {
+      script = { plan, time: 0, tick: 0, startedAt: performance.now(), stage: 0, clock: 0 };
       return true;
     }
   }
@@ -1813,17 +2060,103 @@ function advanceScript() {
 
   if (script.tick % TICKS_PER_CAPTURE === 0) captureFrame(script.clock + script.time);
   script.tick += 1;
+  let boundary = 0;
+  for (const step of plan.steps) {
+    boundary += step.duration;
+    if (boundary <= script.time) continue;
+    if (step.gripHold) {
+      const stepStart = boundary - step.duration;
+      const elapsed = Math.max(0, script.time - stepStart);
+      script.wait = gripped?.id === step.gripHold.target ? (script.wait ?? 0) + GENERATION_DT : 0;
+      if (script.wait >= step.gripHold.min) {
+        const shortened = Math.max(GENERATION_DT, elapsed);
+        plan.total -= step.duration - shortened;
+        boundary = stepStart + shortened;
+        step.duration = shortened;
+        script.wait = 0;
+        break;
+      }
+      if (elapsed >= step.gripHold.max) {
+        throw new Error(`GRIP TIMEOUT - ${step.gripHold.target.toUpperCase()} cube did not establish a stable bilateral grip`);
+      }
+      break;
+    }
+    if (step.cartesian && step.cartesian.gripper === GRIPPER_OPEN &&
+        step.cartesian.to.y < step.cartesian.from.y &&
+        props.some((prop) => fingerColliders.some((finger) => touching(prop.collider, finger)))) {
+      throw new Error("APPROACH COLLISION - a finger touched a cube before closing");
+    }
+    if (script.time + GENERATION_DT >= boundary) {
+      // Redundant joint errors can cancel at the tool. Gate A1Z waypoints on the
+      // actual TCP pose, which is the task-space quantity the IK was asked to reach.
+      const gripperReached = step.pose.gripper < GRIPPER_OPEN
+        || Math.abs(measuredValues.gripper - step.pose.gripper) <= 3;
+      const jointReached = JOINTS.every((joint) => joint.unit === "percent"
+        || Math.abs(measuredValues[joint.name] - step.pose[joint.name]) <= 0.5);
+      let tcpReached = constrainedIK === null;
+      let orientationReached = constrainedIK === null;
+      const wristBody = armLinkBodies.get("arm_link6");
+      const expectedPose = constrainedIK?.forwardPose(step.pose);
+      if (expectedPose && wristBody) {
+        const at = wristBody.translation();
+        const rot = wristBody.rotation();
+        const actualRotation = new THREE.Quaternion(rot.x, rot.y, rot.z, rot.w);
+        const actual = new THREE.Vector3(A1Z_JAW_ANCHOR, 0, 0)
+          .applyQuaternion(actualRotation)
+          .add(new THREE.Vector3(at.x, at.y, at.z));
+        tcpReached = actual.distanceTo(expectedPose.position) <= 0.001;
+        orientationReached = actualRotation.angleTo(expectedPose.rotation) <= revolute(0.75);
+      }
+      const reached = gripperReached && (constrainedIK ? tcpReached && orientationReached : jointReached);
+      const reachedForStep = step.completion === "joint"
+        ? gripperReached && jointReached
+        : reached;
+      if (!reachedForStep) {
+        script.wait = (script.wait ?? 0) + GENERATION_DT;
+        if (script.wait > 3) {
+          const expected = constrainedIK?.forwardPose(step.pose);
+          const bodyAt = wristBody?.translation();
+          const bodyRot = wristBody?.rotation();
+          const actualRotation = bodyRot ? new THREE.Quaternion(bodyRot.x, bodyRot.y, bodyRot.z, bodyRot.w) : null;
+          const actualTCP = bodyAt && actualRotation ? new THREE.Vector3(A1Z_JAW_ANCHOR, 0, 0)
+            .applyQuaternion(actualRotation).add(new THREE.Vector3(bodyAt.x, bodyAt.y, bodyAt.z)) : null;
+          const diagnostic = {
+            physics: contactAndMotorDiagnostic(),
+            stage: script.stage + 1,
+            waypoint: plan.steps.indexOf(step) + 1,
+            simulatedSeconds: round4(script.clock + script.time),
+            waitSeconds: round4(script.wait),
+            joints: JOINTS.map((joint) => ({
+              name: joint.name,
+              unit: joint.unit,
+              target: round4(step.pose[joint.name]),
+              command: round4(currentValues[joint.name]),
+              actual: round4(measuredValues[joint.name]),
+              error: round4(measuredValues[joint.name] - step.pose[joint.name]),
+              servoTrimDeg: joint.unit === "deg" ? round4(measured(armJoints?.get(joint.urdfJoints[0])?.trim ?? 0)) : null,
+              angularVelocity: armJoints?.get(joint.urdfJoints[0])?.child.angvel(),
+            })),
+            targetTCP: expected?.position.toArray(),
+            actualTCP: actualTCP?.toArray(),
+            tcpErrorMm: expected && actualTCP ? round4(expected.position.distanceTo(actualTCP) * 1000) : null,
+            orientationErrorDeg: expected && actualRotation ? round4(measured(expected.rotation.angleTo(actualRotation))) : null,
+            gripped: gripped?.id ?? null,
+            fingerContacts: props.filter((prop) => fingerColliders.some((finger) => touching(prop.collider, finger))).map((prop) => prop.id),
+          };
+          console.warn("TRACKING_DIAGNOSTIC " + JSON.stringify(diagnostic));
+          throw new Error(`TRACKING ERROR - stage ${diagnostic.stage}, waypoint ${diagnostic.waypoint}, TCP error ${diagnostic.tcpErrorMm} mm; see TRACKING_DIAGNOSTIC`);
+        }
+        script.clock += GENERATION_DT;
+        return true;
+      }
+      script.wait = 0;
+    }
+    break;
+  }
   script.time += GENERATION_DT;
   if (script.time < plan.total) return true;
 
-  // Leg finished. Plan the next one from where the world actually ended up, so any drift in the
-  // base cube while the first cube landed on it is taken into account rather than assumed away.
-  const stage = script.stage + 1;
-  if (stage >= STACK_STAGES) return false;
-  const next = buildStage(task.order[stage + 1], stage + 1);
-  if (!next) return false; // unreachable from here: end the episode, it will score as a failure
-  script = { plan: next, time: 0, tick: script.tick, stage, clock: script.clock + plan.total };
-  return true;
+  return false;
 }
 
 function setGenerationControls(running: boolean) {
@@ -1851,7 +2184,9 @@ function finishGeneration(problem?: string) {
     const finished = writer;
     writeDatasetMeta(summary)
       .then(() => {
-        statusElement.textContent = `${report} — RUN tools/to_lerobot.py ON ${finished.root.name}/`;
+        statusElement.textContent = summary.completed > 0
+          ? `${report} — RUN tools/to_lerobot.py ON ${finished.root.name}/`
+          : `${report} — NO COMPLETED EPISODES SAVED`;
       })
       .catch((error) => {
         statusElement.textContent = `${report} — COULD NOT WRITE meta.json: ${error}`;
@@ -1870,7 +2205,15 @@ async function startGeneration() {
 
   writer = null;
   const outputMode = document.querySelector<HTMLSelectElement>("#generation-output")!.value;
-  if (canWriteToDisk() && outputMode === "folder") {
+  if (outputMode === "local") {
+    try {
+      const result = await postDataset("start", {});
+      writer = { root: { name: result.name }, localRun: result.run };
+    } catch (error) {
+      statusElement.textContent = `CANNOT WRITE PROJECT data/ - USE THE LOCAL VITE SERVER: ${error}`;
+      return;
+    }
+  } else if (canWriteToDisk() && outputMode === "folder") {
     try {
       // Must be called straight off the click: the picker needs the user gesture.
       const root = await window.showDirectoryPicker({ mode: "readwrite" });
@@ -1903,7 +2246,22 @@ function runGeneration() {
         return;
       }
     }
-    if (!advanceScript()) {
+    if (performance.now() - script.startedAt >= EPISODE_TIMEOUT_MS) {
+      finishGeneration("EPISODE TIMEOUT - the current episode did not finish within 60 seconds");
+      return;
+    }
+    let advancing: boolean;
+    try {
+      advancing = advanceScript();
+    } catch (error) {
+      Object.assign(currentValues, measuredValues);
+      Object.assign(targetValues, measuredValues);
+      clearMotorTrims();
+      commandArm(currentValues);
+      finishGeneration(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    if (!advancing) {
       const episode = buildEpisode();
       const index = generation.completed;
       generation.completed += 1;
@@ -1972,6 +2330,7 @@ function animate(now: number) {
   // Mounted cameras need their parent link transforms updated before rendering.
   scene.updateMatrixWorld(true);
   renderSensorPreviews(now);
+  updateColliderDebug();
   const viewCamera = activeView === "orbit" ? camera : sensorCameras.get(activeView)!;
   viewCamera.aspect = camera.aspect;
   viewCamera.updateProjectionMatrix();
