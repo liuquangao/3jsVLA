@@ -2047,15 +2047,18 @@ const TICKS_PER_CAPTURE = Math.round(1 / (CAPTURE_HZ * GENERATION_DT));
 /** Ticks are processed in slices, so the page keeps rendering and you can watch it collect. */
 const GENERATION_BUDGET_MS = 8;
 const EPISODE_TIMEOUT_MS = 60_000;
+const MAX_REACHABLE_LAYOUT_SAMPLES = 32;
 
 function startGeneratedEpisode() {
-  // A failed layout must never fall through to planning with the previous
-  // task and frame buffer, otherwise consecutive episodes become duplicates.
-  if (!newEpisode()) return false;
-  const plan = buildTransfer(task.target, new THREE.Vector2(...task.region.center));
-  if (plan) {
-    script = { plan, time: 0, tick: 0, startedAt: performance.now(), stage: 0, clock: 0 };
-    return true;
+  // Layout sampling is preparation, not an executed attempt. Only expose a
+  // scene to the generator after its complete pick-and-place path is reachable.
+  for (let sample = 0; sample < MAX_REACHABLE_LAYOUT_SAMPLES; sample += 1) {
+    if (!newEpisode()) continue;
+    const plan = buildTransfer(task.target, new THREE.Vector2(...task.region.center));
+    if (plan) {
+      script = { plan, time: 0, tick: 0, startedAt: performance.now(), stage: 0, clock: 0 };
+      return true;
+    }
   }
   return false;
 }
@@ -2300,11 +2303,11 @@ function runGeneration() {
         finishGeneration();
         return;
       }
-      generation.attempted += 1;
       if (!startGeneratedEpisode()) {
-        skipGeneratedEpisode("PLANNING FAILED - no reachable layout and transfer plan");
+        finishGeneration("COULD NOT SAMPLE A REACHABLE PICK-AND-PLACE LAYOUT");
         return;
       }
+      generation.attempted += 1;
     }
     if (performance.now() - script.startedAt >= EPISODE_TIMEOUT_MS) {
       skipGeneratedEpisode("EPISODE TIMEOUT - the current episode did not finish within 60 seconds");

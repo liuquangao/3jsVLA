@@ -55,7 +55,7 @@ J1-J6: 0 degrees
 Gripper: 100% open
 ```
 
-An episode is successful when the requested cube is released, resting on the table, and fully inside the yellow circle. Failed, unreachable, colliding, or timed-out attempts are discarded and automatically retried. A batch stops only after collecting the requested number of successful episodes or reaching ten times that number of attempts. Write failures still stop immediately so data cannot be reported as saved when storage is unavailable.
+An episode is successful when the requested cube is released, resting on the table, and fully inside the yellow circle. Candidate scenes are checked against the complete IK pick-and-place path before an attempt begins, so unreachable layouts are resampled and never consume the attempt budget. Executed attempts that collide, lose the grasp, miss the target, or time out are discarded and retried. A batch stops only after collecting the requested number of successful episodes or reaching ten times that number of executed attempts. Write failures still stop immediately so data cannot be reported as saved when storage is unavailable.
 
 ## Dataset Layout
 
