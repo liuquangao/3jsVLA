@@ -434,6 +434,10 @@ let generation: {
   requested: number;
   completed: number;
   succeeded: number;
+  attempted: number;
+  failed: number;
+  maxAttempts: number;
+  failureReasons: Record<string, number>;
   /** Set while an episode is being flushed to disk; ticking resumes when it settles. */
   flushing: boolean;
 } | null = null;
@@ -2006,7 +2010,13 @@ async function writeEpisode(episode: ReturnType<typeof buildEpisode>, index: num
   await writeFile(directory, "episode.json", JSON.stringify(record));
 }
 
-async function writeDatasetMeta(summary: { completed: number; succeeded: number }) {
+async function writeDatasetMeta(summary: {
+  completed: number;
+  succeeded: number;
+  attempted: number;
+  failed: number;
+  failureReasons: Record<string, number>;
+}) {
   await writeMetadata(
     JSON.stringify(
       {
@@ -2017,6 +2027,9 @@ async function writeDatasetMeta(summary: { completed: number; succeeded: number 
         joints: JOINTS.map((joint) => joint.name),
         episodes: summary.completed,
         successes: summary.succeeded,
+        attempts: summary.attempted,
+        failures: summary.failed,
+        failure_reasons: summary.failureReasons,
         created_at: new Date().toISOString(),
       },
       null,
@@ -2036,15 +2049,13 @@ const GENERATION_BUDGET_MS = 8;
 const EPISODE_TIMEOUT_MS = 60_000;
 
 function startGeneratedEpisode() {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    // A failed layout must never fall through to planning with the previous
-    // task and frame buffer, otherwise consecutive episodes become duplicates.
-    if (!newEpisode()) continue;
-    const plan = buildTransfer(task.target, new THREE.Vector2(...task.region.center));
-    if (plan) {
-      script = { plan, time: 0, tick: 0, startedAt: performance.now(), stage: 0, clock: 0 };
-      return true;
-    }
+  // A failed layout must never fall through to planning with the previous
+  // task and frame buffer, otherwise consecutive episodes become duplicates.
+  if (!newEpisode()) return false;
+  const plan = buildTransfer(task.target, new THREE.Vector2(...task.region.center));
+  if (plan) {
+    script = { plan, time: 0, tick: 0, startedAt: performance.now(), stage: 0, clock: 0 };
+    return true;
   }
   return false;
 }
@@ -2172,6 +2183,25 @@ function setGenerationControls(running: boolean) {
   generateButton.textContent = running ? "Generating…" : "Generate";
 }
 
+function skipGeneratedEpisode(reason: string) {
+  const summary = generation!;
+  const category = reason.split(" - ", 1)[0];
+  summary.failed += 1;
+  summary.failureReasons[category] = (summary.failureReasons[category] ?? 0) + 1;
+  script = null;
+  frames = [];
+  clearMotorTrims();
+  if (summary.attempted >= summary.maxAttempts) {
+    finishGeneration(
+      `MAX ATTEMPTS REACHED - ${summary.succeeded}/${summary.requested} successful; last failure: ${reason}`,
+    );
+    return;
+  }
+  statusElement.textContent =
+    `SKIPPED ATTEMPT ${summary.attempted}/${summary.maxAttempts} — ${reason} — ` +
+    `${summary.succeeded}/${summary.requested} SUCCESSFUL`;
+}
+
 function finishGeneration(problem?: string) {
   const summary = generation!;
   generation = null;
@@ -2180,8 +2210,8 @@ function finishGeneration(problem?: string) {
   datasetButton.disabled = dataset.length === 0;
   replayButton.disabled = frames.length === 0;
   downloadButton.disabled = frames.length === 0;
-  const rate = summary.completed ? Math.round((summary.succeeded / summary.completed) * 100) : 0;
-  const done = `${summary.completed} EPISODES — ${summary.succeeded} SUCCEEDED (${rate}%)`;
+  const done = `${summary.succeeded}/${summary.requested} SUCCESSFUL — ` +
+    `${summary.failed} SKIPPED IN ${summary.attempted} ATTEMPTS`;
   const target = writer ? ` INTO ${writer.root.name}/` : "";
   const report = problem ? `STOPPED AFTER ${done} — ${problem}` : `GENERATED ${done}${target}`;
 
@@ -2240,7 +2270,16 @@ async function startGeneration() {
   }
 
   dataset = [];
-  generation = { requested, completed: 0, succeeded: 0, flushing: false };
+  generation = {
+    requested,
+    completed: 0,
+    succeeded: 0,
+    attempted: 0,
+    failed: 0,
+    maxAttempts: requested * 3,
+    failureReasons: {},
+    flushing: false,
+  };
   setGenerationControls(true);
   datasetButton.disabled = true;
   statusElement.textContent = writer
@@ -2252,17 +2291,18 @@ function runGeneration() {
   const deadline = performance.now() + GENERATION_BUDGET_MS;
   while (generation && !generation.flushing && performance.now() < deadline) {
     if (!script) {
-      if (generation.completed >= generation.requested) {
+      if (generation.succeeded >= generation.requested) {
         finishGeneration();
         return;
       }
+      generation.attempted += 1;
       if (!startGeneratedEpisode()) {
-        finishGeneration("COULD NOT PLAN A REACHABLE EPISODE");
+        skipGeneratedEpisode("PLANNING FAILED - no reachable layout and transfer plan");
         return;
       }
     }
     if (performance.now() - script.startedAt >= EPISODE_TIMEOUT_MS) {
-      finishGeneration("EPISODE TIMEOUT - the current episode did not finish within 60 seconds");
+      skipGeneratedEpisode("EPISODE TIMEOUT - the current episode did not finish within 60 seconds");
       return;
     }
     let advancing: boolean;
@@ -2273,14 +2313,18 @@ function runGeneration() {
       Object.assign(targetValues, measuredValues);
       clearMotorTrims();
       commandArm(currentValues);
-      finishGeneration(error instanceof Error ? error.message : String(error));
+      skipGeneratedEpisode(error instanceof Error ? error.message : String(error));
       return;
     }
     if (!advancing) {
       const episode = buildEpisode();
+      if (!episode.success) {
+        skipGeneratedEpisode("TASK FAILED - trajectory finished outside the success condition");
+        return;
+      }
       const index = generation.completed;
       generation.completed += 1;
-      if (episode.success) generation.succeeded += 1;
+      generation.succeeded += 1;
       script = null;
       statusElement.textContent =
         `GENERATING ${generation.completed}/${generation.requested} — ${generation.succeeded} SUCCEEDED`;
