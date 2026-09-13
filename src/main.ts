@@ -1778,9 +1778,11 @@ type ScriptStep = {
 };
 type Script = { steps: ScriptStep[]; start: JointValues; total: number };
 
-// Demonstration speed, not the arm's limit. A moderate rate lets the physical
-// arm settle at the hover pose instead of visibly catching up before descent.
-const ARM_SPEED = 22; // deg/s
+// Demonstration speeds, not the arm's hardware limits. Cartesian segments are
+// kept separate so vertical grasp and placement motion does not inherit a slow
+// joint-space duration.
+const ARM_SPEED = 28; // deg/s
+const CARTESIAN_SPEED = 0.05; // m/s
 const GRIPPER_SPEED = 90; // percent/s
 
 function stepDuration(from: JointValues, to: JointValues) {
@@ -1877,7 +1879,7 @@ function buildTransfer(sourceId: PropId, destination: THREE.Vector2): Script | n
       pathSeed = solution;
     }
     trajectory[index].cartesian = { from, to, pitch, azimuth, gripper };
-    const duration = Math.max(steps[index].duration, from.distanceTo(to) / 0.025);
+    const duration = Math.max(steps[index].duration, from.distanceTo(to) / CARTESIAN_SPEED);
     total += duration - steps[index].duration;
     steps[index].duration = duration;
   }
