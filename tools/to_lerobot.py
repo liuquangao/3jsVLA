@@ -31,9 +31,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 CAMERA_KEY = "observation.images.front"
 
-# The project was called NanoVLA before it was called 3jsVLA. Dumps written under the old name
-# have the same layout, so they are still accepted rather than being orphaned by a rename.
-DUMP_FORMATS = {"3jsvla.dump.v1", "nanovla.dump.v1"}
+DUMP_FORMAT = "3jsvla.dump.v1"
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,10 +55,8 @@ def load_dump(source: Path) -> tuple[dict, list[Path]]:
             "the one holding meta.json and episodes/."
         )
     meta = json.loads(meta_path.read_text())
-    if meta.get("format") not in DUMP_FORMATS:
-        raise SystemExit(
-            f"unexpected dump format {meta.get('format')!r}, expected one of {sorted(DUMP_FORMATS)}"
-        )
+    if meta.get("format") != DUMP_FORMAT:
+        raise SystemExit(f"unexpected dump format {meta.get('format')!r}, expected {DUMP_FORMAT!r}")
 
     episodes = sorted((source / "episodes").iterdir())
     if not episodes:

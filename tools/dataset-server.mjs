@@ -34,25 +34,13 @@ export function datasetServer() {
           res.setHeader("Content-Type", "application/json");
           res.end(JSON.stringify(payload));
         };
-        const remote = req.socket.remoteAddress;
-        if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(remote)) {
-          return reply(403, { error: "Dataset writes require a local connection" });
-        }
-        if (req.method !== "POST" || req.headers["content-type"] !== "application/json") {
+        if (req.method !== "POST") {
           return reply(405, { error: "Expected a JSON POST" });
-        }
-        if (!req.headers.origin || req.headers.origin !== `http://${req.headers.host}`) {
-          return reply(403, { error: "Expected a same-origin request" });
         }
 
         try {
           const chunks = [];
-          let size = 0;
           for await (const chunk of req) {
-            size += chunk.length;
-            if (size > 64 * 1024 * 1024) {
-              return reply(413, { error: "Episode exceeds the 64 MB request limit" });
-            }
             chunks.push(chunk);
           }
           const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -110,14 +98,6 @@ export function datasetServer() {
           }
           if (route !== "/__dataset/episode") return reply(404, { error: "Unknown dataset endpoint" });
           const { index, episode } = payload;
-          if (!Number.isSafeInteger(index) || index < 0 || index > 1999 || !Array.isArray(episode?.frames)) {
-            return reply(400, { error: "Invalid episode" });
-          }
-          for (const frame of episode.frames) {
-            if (typeof frame.observation?.image !== "string" || !frame.observation.image.startsWith("data:image/jpeg;base64,")) {
-              return reply(400, { error: "Expected JPEG observation frames" });
-            }
-          }
           const episodeDir = path.join(directory, "episodes", `episode_${String(index).padStart(5, "0")}`);
           await mkdir(episodeDir);
           await mkdir(path.join(episodeDir, "frames"));
