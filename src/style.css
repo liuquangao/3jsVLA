@@ -306,7 +306,6 @@ textarea:focus {
 .joint-row label,
 .joint-value,
 .capture-stats span,
-.sensor-strip,
 .text-button,
 .statusbar {
   font-family: "DM Mono", monospace;
@@ -490,35 +489,6 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   margin-top: 13px;
-}
-
-.sensor-strip {
-  display: grid;
-  grid-template-columns: 1fr 112px;
-  gap: 12px;
-  align-items: center;
-  padding: 14px 18px;
-  font-size: 8px;
-  letter-spacing: 0.06em;
-}
-
-.sensor-strip span,
-.sensor-strip small {
-  display: block;
-}
-
-.sensor-strip small {
-  margin-top: 5px;
-  color: var(--muted);
-  font-size: 8px;
-}
-
-.sensor-strip img {
-  width: 112px;
-  height: 84px;
-  border: 1px solid var(--ink);
-  background: #cbc5b8;
-  object-fit: cover;
 }
 
 .statusbar {
