@@ -87,8 +87,12 @@ export function datasetServer() {
               );
               return reply(200, { saved: true, name: `data/${payload.run}/lerobot_v3`, log });
             } catch (error) {
+              const detail = error instanceof Error ? error.message : String(error);
+              const reason = detail.includes("No module named 'lerobot'")
+                ? "LeRobot is not installed in .venv"
+                : detail;
               return reply(500, {
-                error: `LeRobot v3 conversion failed: ${error instanceof Error ? error.message : String(error)}. Install tools/requirements.txt into .venv and retry.`,
+                error: `LeRobot v3 conversion failed: ${reason}. Install tools/requirements.txt into .venv and retry.`,
               });
             }
           }

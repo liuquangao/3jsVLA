@@ -2221,8 +2221,13 @@ function finishGeneration(problem?: string) {
       .then(async () => {
         if (summary.succeeded > 0 && "localRun" in finished && finished.convertToLerobot) {
           statusElement.textContent = `${report} — CONVERTING SUCCESSFUL EPISODES TO LEROBOT V3`;
-          const result = await postDataset("convert", { run: finished.localRun });
-          statusElement.textContent = `${report} — LEROBOT V3 READY AT ${result.name}/`;
+          try {
+            const result = await postDataset("convert", { run: finished.localRun });
+            statusElement.textContent = `${report} — LEROBOT V3 READY AT ${result.name}/`;
+          } catch (error) {
+            statusElement.textContent =
+              `${report} — RAW DATA READY AT ${finished.root.name}/ — LEROBOT V3 NOT CREATED: ${error}`;
+          }
           return;
         }
         statusElement.textContent = summary.completed > 0
@@ -2276,7 +2281,7 @@ async function startGeneration() {
     succeeded: 0,
     attempted: 0,
     failed: 0,
-    maxAttempts: requested * 3,
+    maxAttempts: requested * 10,
     failureReasons: {},
     flushing: false,
   };

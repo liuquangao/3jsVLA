@@ -55,7 +55,7 @@ J1-J6: 0 degrees
 Gripper: 100% open
 ```
 
-An episode is successful when the requested cube is released, resting on the table, and fully inside the yellow circle. Failed, unreachable, colliding, or timed-out attempts are discarded and automatically retried. A batch stops only after collecting the requested number of successful episodes or reaching three times that number of attempts. Write failures still stop immediately so data cannot be reported as saved when storage is unavailable.
+An episode is successful when the requested cube is released, resting on the table, and fully inside the yellow circle. Failed, unreachable, colliding, or timed-out attempts are discarded and automatically retried. A batch stops only after collecting the requested number of successful episodes or reaching ten times that number of attempts. Write failures still stop immediately so data cannot be reported as saved when storage is unavailable.
 
 ## Dataset Layout
 
@@ -89,7 +89,7 @@ action.joint_targets
 Automatic conversion uses the official `LeRobotDataset` writer. Install its Python environment once before generating:
 
 ```powershell
-python -m venv .venv
+py -3.13 -m venv .venv
 .venv\Scripts\python -m pip install -r tools\requirements.txt
 ```
 
