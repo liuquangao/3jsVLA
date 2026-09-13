@@ -105,6 +105,8 @@ export function datasetServer() {
           const episodeDir = path.join(directory, "episodes", `episode_${String(index).padStart(5, "0")}`);
           await mkdir(episodeDir);
           await mkdir(path.join(episodeDir, "frames"));
+          await mkdir(path.join(episodeDir, "frames", "top"));
+          await mkdir(path.join(episodeDir, "frames", "gripper"));
           const frames = new Array(episode.frames.length);
           // Hundreds of sequential writes can leave the arm visibly idle for a
           // minute at 10 FPS. Bounded batches keep Windows responsive while
@@ -113,10 +115,19 @@ export function datasetServer() {
           for (let offset = 0; offset < episode.frames.length; offset += WRITE_BATCH_SIZE) {
             await Promise.all(episode.frames.slice(offset, offset + WRITE_BATCH_SIZE).map(async (frame, batchIndex) => {
               const frameIndex = offset + batchIndex;
-              const { image, ...observation } = frame.observation;
+              const { images, ...observation } = frame.observation;
               const file = `${String(frameIndex).padStart(6, "0")}.jpg`;
-              await writeFile(path.join(episodeDir, "frames", file), Buffer.from(image.slice(image.indexOf(",") + 1), "base64"));
-              frames[frameIndex] = { ...frame, observation: { ...observation, image_path: `frames/${file}` } };
+              await Promise.all([
+                writeFile(path.join(episodeDir, "frames", "top", file), Buffer.from(images.top.slice(images.top.indexOf(",") + 1), "base64")),
+                writeFile(path.join(episodeDir, "frames", "gripper", file), Buffer.from(images.gripper.slice(images.gripper.indexOf(",") + 1), "base64")),
+              ]);
+              frames[frameIndex] = {
+                ...frame,
+                observation: {
+                  ...observation,
+                  image_paths: { top: `frames/top/${file}`, gripper: `frames/gripper/${file}` },
+                },
+              };
             }));
           }
           await writeFile(path.join(episodeDir, "episode.json"), JSON.stringify({ ...episode, frames }));

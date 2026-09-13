@@ -13,7 +13,10 @@ type JointValues = Record<string, number>;
 type EpisodeFrame = {
   timestamp: number;
   observation: {
-    image: string;
+    images: {
+      top: string;
+      gripper: string;
+    };
     joint_positions: JointValues;
     /** Ground truth, for debugging and for scoring an evaluation run. */
     object_poses: Array<{
@@ -1511,18 +1514,21 @@ function stopRecording() {
   statusElement.textContent = `EPISODE READY — ${frames.length} frames captured`;
 }
 
-/** Renders the observation camera and returns the frame as a JPEG data URL. */
-function renderObservation() {
-  renderObservationView(observationCamera);
+/** Renders one physical sensor camera and returns its JPEG observation. */
+function renderObservation(view: THREE.Camera) {
+  renderObservationView(view);
   return observationRenderer.domElement.toDataURL("image/jpeg", 0.72);
 }
 
 function captureFrame(seconds: number) {
-  const image = renderObservation();
+  const images = {
+    top: renderObservation(sensorCameras.get("overhead")!),
+    gripper: renderObservation(sensorCameras.get("wrist")!),
+  };
   frames.push({
     timestamp: Number(seconds.toFixed(3)),
     observation: {
-      image,
+      images,
       joint_positions: cloneJointValues(measuredValues),
       object_poses: props.map((prop) => ({
         id: prop.id,
@@ -1535,7 +1541,7 @@ function captureFrame(seconds: number) {
       joint_targets: cloneJointValues(targetValues),
     },
   });
-  previewElement.src = image;
+  previewElement.src = images.top;
   updateStats(seconds * 1000);
 }
 
@@ -1561,7 +1567,7 @@ function updateReplay(now: number) {
   while (replayIndex < frames.length && frames[replayIndex].timestamp <= elapsed) {
     Object.assign(currentValues, frames[replayIndex].observation.joint_positions);
     Object.assign(targetValues, currentValues);
-    previewElement.src = frames[replayIndex].observation.image;
+    previewElement.src = frames[replayIndex].observation.images.top;
     updateJointUI(currentValues);
     replayIndex += 1;
   }
@@ -1576,7 +1582,7 @@ function updateReplay(now: number) {
 
 function buildEpisode() {
   return {
-    format: "3jsvla.episode.v2",
+    format: "3jsvla.episode.v3",
     robot: spec.id,
     instruction: instructionElement.value.trim(),
     task: { target: task.target, region: task.region },
@@ -1749,7 +1755,7 @@ function newEpisode() {
   updateStats(0);
   // Refresh the preview so it shows the scene you are actually looking at. Skipped while
   // generating, where the episode's own first capture lands a frame a moment later anyway.
-  if (!generation) previewElement.src = renderObservation();
+  if (!generation) previewElement.src = renderObservation(sensorCameras.get("overhead")!);
   statusElement.textContent = "NEW TASK — adjust a joint, then start recording";
   return true;
 }
@@ -1995,15 +2001,26 @@ async function writeEpisode(episode: ReturnType<typeof buildEpisode>, index: num
   const name = `episode_${String(index).padStart(5, "0")}`;
   const directory = await destination.episodes.getDirectoryHandle(name, { create: true });
   const frameDirectory = await directory.getDirectoryHandle("frames", { create: true });
+  const topDirectory = await frameDirectory.getDirectoryHandle("top", { create: true });
+  const gripperDirectory = await frameDirectory.getDirectoryHandle("gripper", { create: true });
 
   const record = {
     ...episode,
     frames: await Promise.all(
       episode.frames.map(async (frame, frameIndex) => {
         const file = `${String(frameIndex).padStart(6, "0")}.jpg`;
-        await writeFile(frameDirectory, file, dataUrlToBlob(frame.observation.image));
-        const { image: _image, ...observation } = frame.observation;
-        return { ...frame, observation: { ...observation, image_path: `frames/${file}` } };
+        await Promise.all([
+          writeFile(topDirectory, file, dataUrlToBlob(frame.observation.images.top)),
+          writeFile(gripperDirectory, file, dataUrlToBlob(frame.observation.images.gripper)),
+        ]);
+        const { images: _images, ...observation } = frame.observation;
+        return {
+          ...frame,
+          observation: {
+            ...observation,
+            image_paths: { top: `frames/top/${file}`, gripper: `frames/gripper/${file}` },
+          },
+        };
       }),
     ),
   };
@@ -2309,7 +2326,7 @@ function runGeneration() {
       }
       generation.attempted += 1;
     }
-    if (performance.now() - script.startedAt >= EPISODE_TIMEOUT_MS) {
+    if (performance.now() - script!.startedAt >= EPISODE_TIMEOUT_MS) {
       skipGeneratedEpisode("EPISODE TIMEOUT - the current episode did not finish within 60 seconds");
       return;
     }
@@ -2417,7 +2434,7 @@ resizeRenderer();
 useBackdrop(0);
 newEpisode();
 stepPhysics(PHYSICS_STEP);
-previewElement.src = renderObservation();
+previewElement.src = renderObservation(sensorCameras.get("overhead")!);
 renderer.setAnimationLoop(animate);
 
 recordButton.addEventListener("click", startRecording);

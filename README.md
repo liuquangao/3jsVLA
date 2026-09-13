@@ -66,8 +66,8 @@ data/<run-id>/
     `-- episode_00000/
         |-- episode.json
         `-- frames/
-            |-- 000000.jpg
-            `-- ...
+            |-- top/000000.jpg
+            `-- gripper/000000.jpg
 `-- lerobot_v3/                  # training-ready Parquet, MP4 and metadata
 ```
 
@@ -75,7 +75,8 @@ Each frame contains:
 
 ```text
 timestamp
-observation.image_path
+observation.image_paths.top
+observation.image_paths.gripper
 observation.joint_positions
 observation.object_poses
 observation.grasped
@@ -96,8 +97,18 @@ py -3.13 -m venv .venv
 On Linux or macOS, replace `.venv\Scripts\python` with `.venv/bin/python`. If the dependency is unavailable, collection still preserves the raw run and the page reports the setup command. Existing runs can always be converted manually:
 
 ```powershell
-.venv\Scripts\python tools\to_lerobot.py data\<run-id> --repo-id you/3jsvla-a1z --root lerobot_out --success-only
+.venv\Scripts\python tools\to_lerobot.py data\<run-id> --repo-id you/3jsvla-a1z --root data\<run-id>\lerobot_v3 --success-only
 ```
+
+Without `--root` the dataset is written to the Hugging Face cache instead of the run directory, so pass it explicitly to keep the layout above.
+
+Reading the resulting MP4s needs FFmpeg's shared libraries on `PATH`. Without them `torchcodec` cannot load and LeRobot falls back to a slower `pyav` decoder after printing a long traceback, which is noisy but harmless. On Windows:
+
+```powershell
+winget install --id BtbN.FFmpeg.GPL.Shared.7.1
+```
+
+Pick a *shared* build. The static builds ship only `ffmpeg.exe`, not the `avutil`/`avcodec` libraries `torchcodec` loads.
 
 ## Architecture
 
@@ -119,6 +130,26 @@ Three.js renderer - Robot controller - Rapier physics
 - **The recorder** samples RGB, state, and next-step actions at 10 Hz.
 - **Python tooling** converts browser output into a training-ready LeRobot dataset.
 
+## Train 3jsVLA-Tiny
+
+The educational TinyVLA keeps every important part visible in plain PyTorch: two-camera visual
+tokens, language tokens, a state token, multimodal self-attention, and a flow-matching action
+expert. It does not use Hugging Face Transformers or a hidden trainer.
+
+```powershell
+.venv\Scripts\python -m training.train `
+  --dataset-root data\<run-id>\lerobot_v3 `
+  --repo-id local/3jsvla-a1z
+```
+
+The model is about 9M parameters and trains on whatever device is available, falling back to CPU
+when no CUDA device is present. CPU training is viable for the overfitting milestone but slow: on
+eight cores, one epoch over a 20-episode run (3,946 samples, batch 16) takes roughly seven minutes,
+and most of that is the vision encoder rather than video decoding. Lower the image resolution in
+`TinyVLAConfig` when iterating locally.
+
+See `training/README.md` for the architecture and training controls.
+
 ## Project Structure
 
 ```text
@@ -135,6 +166,7 @@ Three.js renderer - Robot controller - Rapier physics
 |-- tools/
 |   |-- to_lerobot.py
 |   `-- requirements.txt
+|-- training/                 # readable TinyVLA and flow-matching trainer
 |-- docs/
 |-- data/                   # generated runs
 |-- index.html
@@ -145,7 +177,7 @@ Three.js renderer - Robot controller - Rapier physics
 
 3jsVLA is an educational simulator and data-generation project, not a validated digital twin. The scripted controller is useful for producing demonstrations, but difficult layouts can still fail because of IK reach, tracking error, collision, or unstable frictional grasping.
 
-Planned next steps are training a small behaviour-cloning policy, running inference in the browser loop, and adding repeatable evaluation metrics.
+The TinyVLA trainer exists and the loop from collection to a training checkpoint runs end to end, but no policy has been trained to the point of being useful yet. Planned next steps are overfitting a policy on a small run, running inference back in the browser loop, and adding repeatable evaluation metrics.
 
 ## License
 

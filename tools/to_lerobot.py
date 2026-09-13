@@ -29,7 +29,10 @@ from PIL import Image
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-CAMERA_KEY = "observation.images.front"
+CAMERA_KEYS = {
+    "top": "observation.images.top",
+    "gripper": "observation.images.gripper",
+}
 
 DUMP_FORMAT = "3jsvla.dump.v1"
 
@@ -65,17 +68,19 @@ def load_dump(source: Path) -> tuple[dict, list[Path]]:
 
 
 def build_features(meta: dict) -> dict:
-    """A joint vector in, a joint vector out, and one camera. Names carry through to info.json."""
+    """Joint vectors and both physical sensor cameras."""
     joints = meta["joints"]
-    return {
+    features = {
         "observation.state": {"dtype": "float32", "shape": (len(joints),), "names": joints},
         "action": {"dtype": "float32", "shape": (len(joints),), "names": joints},
-        CAMERA_KEY: {
+    }
+    for camera_key in CAMERA_KEYS.values():
+        features[camera_key] = {
             "dtype": "video",
             "shape": (meta["image"]["height"], meta["image"]["width"], 3),
             "names": ["height", "width", "channels"],
-        },
-    }
+        }
+    return features
 
 
 def vector(values: dict, joints: list[str]) -> np.ndarray:
@@ -106,15 +111,16 @@ def main() -> None:
 
         for frame in episode["frames"]:
             observation = frame["observation"]
-            image = np.asarray(Image.open(episode_dir / observation["image_path"]).convert("RGB"))
-            dataset.add_frame(
-                {
-                    "observation.state": vector(observation["joint_positions"], joints),
-                    "action": vector(frame["action"]["joint_targets"], joints),
-                    CAMERA_KEY: image,
-                    "task": episode["instruction"],
-                }
-            )
+            sample = {
+                "observation.state": vector(observation["joint_positions"], joints),
+                "action": vector(frame["action"]["joint_targets"], joints),
+                "task": episode["instruction"],
+            }
+            for camera, camera_key in CAMERA_KEYS.items():
+                sample[camera_key] = np.asarray(
+                    Image.open(episode_dir / observation["image_paths"][camera]).convert("RGB")
+                )
+            dataset.add_frame(sample)
             total_frames += 1
 
         dataset.save_episode()

@@ -3,3 +3,6 @@ dist/
 .DS_Store
 .venv/
 data/
+checkpoints/
+__pycache__/
+*.pyc
