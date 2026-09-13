@@ -109,6 +109,24 @@
             </div>
           </section>
 
+          <section class="panel-section policy-section">
+            <div class="section-heading">
+              <span>04</span>
+              <h2>Policy inference</h2>
+            </div>
+            <div class="secondary-actions">
+              <label for="policy-model">Checkpoint</label>
+              <select id="policy-model" aria-label="Trained checkpoint">
+                <option value="">No checkpoints found</option>
+              </select>
+            </div>
+            <div class="capture-actions">
+              <button id="policy-button" class="secondary-button" type="button" disabled>Run policy</button>
+              <button id="policy-stop-button" class="secondary-button" type="button" disabled>Stop</button>
+            </div>
+            <p id="policy-state" class="policy-state">Train a checkpoint, then run it against the live scene.</p>
+          </section>
+
           <img id="observation-preview" alt="" hidden />
         </aside>
       </section>

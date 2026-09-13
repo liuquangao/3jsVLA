@@ -150,6 +150,22 @@ and most of that is the vision encoder rather than video decoding. Lower the ima
 
 See `training/README.md` for the architecture and training controls.
 
+## Run a Policy in the Browser
+
+Checkpoints written to `checkpoints/` appear in the collector's **Policy inference** panel. Pick
+one and press **Run policy**: the page sends both camera images, the measured joint state and the
+current instruction to the dev server, which keeps a `tools/policy_server.py` child alive holding
+the loaded model, and writes the returned joint targets straight into the same `targetValues` the
+sliders drive.
+
+The policy predicts a chunk of sixteen absolute joint targets. Only the first eight are executed
+before the scene is observed again, so tracking error and physics disturbances are corrected
+rather than accumulated. On CPU a chunk takes about a second, which is slower than the eight
+steps it covers, so the arm pauses briefly between chunks.
+
+Inference reuses the loaded process across steps because loading a checkpoint costs seconds while
+a chunk costs a fraction of one. **Stop** ends the run and releases the model.
+
 ## Project Structure
 
 ```text
@@ -165,6 +181,8 @@ See `training/README.md` for the architecture and training controls.
 |   `-- hdri/               # randomised environments
 |-- tools/
 |   |-- to_lerobot.py
+|   |-- policy_server.py    # loaded checkpoint, JSON lines over stdio
+|   |-- policy-server.mjs   # dev-server routes for the inference panel
 |   `-- requirements.txt
 |-- training/                 # readable TinyVLA and flow-matching trainer
 |-- docs/
@@ -177,7 +195,7 @@ See `training/README.md` for the architecture and training controls.
 
 3jsVLA is an educational simulator and data-generation project, not a validated digital twin. The scripted controller is useful for producing demonstrations, but difficult layouts can still fail because of IK reach, tracking error, collision, or unstable frictional grasping.
 
-The TinyVLA trainer exists and the loop from collection to a training checkpoint runs end to end, but no policy has been trained to the point of being useful yet. Planned next steps are overfitting a policy on a small run, running inference back in the browser loop, and adding repeatable evaluation metrics.
+The TinyVLA trainer exists and the loop from collection through training to browser inference runs end to end, but no policy has been trained to the point of being useful yet. A five-epoch checkpoint moves the arm in plausible directions without completing the task. Planned next steps are training to convergence on a larger dataset and adding repeatable evaluation metrics, so policy quality is measured rather than watched.
 
 ## License
 

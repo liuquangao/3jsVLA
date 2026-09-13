@@ -403,6 +403,10 @@ const taskStateElement = document.querySelector<HTMLElement>("#task-state")!;
 const generateButton = document.querySelector<HTMLButtonElement>("#generate-button")!;
 const datasetButton = document.querySelector<HTMLButtonElement>("#dataset-button")!;
 const episodeCountElement = document.querySelector<HTMLInputElement>("#episode-count")!;
+const policyModelElement = document.querySelector<HTMLSelectElement>("#policy-model")!;
+const policyButton = document.querySelector<HTMLButtonElement>("#policy-button")!;
+const policyStopButton = document.querySelector<HTMLButtonElement>("#policy-stop-button")!;
+const policyStateElement = document.querySelector<HTMLElement>("#policy-state")!;
 
 robotBadgeElement.textContent = `${spec.label} / SIM`;
 captureHzElement.textContent = String(CAPTURE_HZ).padStart(2, "0");
@@ -447,6 +451,16 @@ let generation: {
 let recording = false;
 let recordStart = 0;
 let lastSample = 0;
+let policy: {
+  model: string;
+  /** Actions still to execute from the last chunk, in slider units. */
+  queue: number[][];
+  /** True while a chunk request is in flight; the arm holds its last target until it lands. */
+  requesting: boolean;
+  lastStep: number;
+  steps: number;
+  chunks: number;
+} | null = null;
 let replaying = false;
 let replayStart = 0;
 let replayIndex = 0;
@@ -2195,6 +2209,132 @@ function advanceScript() {
   return false;
 }
 
+/**
+ * Closed-loop inference against a trained checkpoint. The policy predicts a chunk of absolute
+ * joint targets; only the first few are executed before re-observing, so tracking error and
+ * physics disturbances are corrected instead of accumulating across the whole chunk.
+ */
+const POLICY_STEPS_PER_CHUNK = 8;
+
+async function postPolicy(route: string, payload: unknown) {
+  const response = await fetch(`/__policy/${route}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload ?? {}),
+  });
+  const result = await response.json().catch(() => ({ error: `${route} returned no JSON` }));
+  if (!response.ok) throw new Error(result.error ?? `${route} failed`);
+  return result;
+}
+
+function setPolicyState(message: string, kind: "idle" | "running" | "error" = "idle") {
+  policyStateElement.textContent = message;
+  policyStateElement.classList.toggle("is-running", kind === "running");
+  policyStateElement.classList.toggle("is-error", kind === "error");
+}
+
+async function refreshPolicyModels() {
+  try {
+    const { models } = await postPolicy("list", {});
+    policyModelElement.replaceChildren();
+    if (!models.length) {
+      policyModelElement.append(new Option("No checkpoints found", ""));
+      policyButton.disabled = true;
+      setPolicyState("No checkpoints in checkpoints/. Train one with training.train first.");
+      return;
+    }
+    for (const model of models) {
+      const megabytes = (model.bytes / 1e6).toFixed(1);
+      policyModelElement.append(new Option(`${model.name} — ${megabytes} MB`, model.name));
+    }
+    policyButton.disabled = false;
+    setPolicyState(`${models.length} checkpoint${models.length === 1 ? "" : "s"} available.`);
+  } catch (error) {
+    policyButton.disabled = true;
+    setPolicyState(`Could not list checkpoints: ${error}`, "error");
+  }
+}
+
+function setPolicyControls(running: boolean) {
+  policyButton.disabled = running;
+  policyStopButton.disabled = !running;
+  policyModelElement.disabled = running;
+  recordButton.disabled = running;
+  generateButton.disabled = running;
+  newTaskButton.disabled = running;
+  resetButton.disabled = running;
+  policyButton.textContent = running ? "Running…" : "Run policy";
+}
+
+async function requestPolicyChunk() {
+  const active = policy;
+  if (!active || active.requesting) return;
+  active.requesting = true;
+  try {
+    const { actions } = await postPolicy("act", {
+      images: {
+        top: renderObservation(sensorCameras.get("overhead")!),
+        gripper: renderObservation(sensorCameras.get("wrist")!),
+      },
+      state: JOINTS.map((joint) => measuredValues[joint.name]),
+      task: instructionElement.value,
+    });
+    // A stop between the request and its reply must not resurrect the policy.
+    if (policy !== active) return;
+    active.queue = actions.slice(0, POLICY_STEPS_PER_CHUNK);
+    active.chunks += 1;
+  } catch (error) {
+    if (policy === active) stopPolicy(`Policy failed: ${error}`, "error");
+  } finally {
+    active.requesting = false;
+  }
+}
+
+/** Drives `targetValues` from the policy at the capture rate; the motors handle the rest. */
+function updatePolicy(now: number) {
+  const active = policy!;
+  if (now - active.lastStep < SAMPLE_INTERVAL) return;
+  active.lastStep = now;
+  const action = active.queue.shift();
+  if (!action) {
+    void requestPolicyChunk();
+    return;
+  }
+  JOINTS.forEach((joint, index) => {
+    targetValues[joint.name] = THREE.MathUtils.clamp(action[index] ?? joint.initial, joint.min, joint.max);
+  });
+  updateJointUI(targetValues);
+  active.steps += 1;
+  setPolicyState(`${active.model} — ${active.chunks} chunks, ${active.steps} steps`, "running");
+  // Fetch the next chunk one step early so the arm is not left waiting on the round trip.
+  if (active.queue.length <= 1) void requestPolicyChunk();
+}
+
+async function startPolicy() {
+  const model = policyModelElement.value;
+  if (!model) return;
+  setPolicyControls(true);
+  setPolicyState(`Loading ${model}…`);
+  try {
+    const ready = await postPolicy("load", { model });
+    policy = { model, queue: [], requesting: false, lastStep: 0, steps: 0, chunks: 0 };
+    setPolicyState(`${model} loaded on ${ready.device ?? "cpu"} — running`, "running");
+    statusElement.textContent = `POLICY RUNNING — ${model}`;
+  } catch (error) {
+    setPolicyControls(false);
+    setPolicyState(`Could not load ${model}: ${error}`, "error");
+  }
+}
+
+function stopPolicy(message = "Policy stopped.", kind: "idle" | "error" = "idle") {
+  const finished = policy;
+  policy = null;
+  setPolicyControls(false);
+  setPolicyState(finished ? `${message} ${finished.steps} steps over ${finished.chunks} chunks.` : message, kind);
+  statusElement.textContent = "POLICY STOPPED";
+  void postPolicy("stop", {}).catch(() => {});
+}
+
 function setGenerationControls(running: boolean) {
   recordButton.disabled = running;
   newTaskButton.disabled = running;
@@ -2395,6 +2535,9 @@ function animate(now: number) {
     if (replaying) {
       updateReplay(now);
     } else {
+      // A running policy writes the same targets the sliders would; everything downstream of
+      // `targetValues` is identical, so inference and manual control share one path.
+      if (policy) updatePolicy(now);
       // Sliders command the motors directly. The lag between command and pose used to be a
       // hand-rolled exponential blend; it now comes from the arm's own inertia.
       const blend = armJoints ? 1 : 1 - Math.exp(-9 * deltaSeconds);
@@ -2445,4 +2588,7 @@ resetButton.addEventListener("click", resetPose);
 newTaskButton.addEventListener("click", newEpisode);
 generateButton.addEventListener("click", startGeneration);
 datasetButton.addEventListener("click", downloadDataset);
+policyButton.addEventListener("click", () => void startPolicy());
+policyStopButton.addEventListener("click", () => stopPolicy());
 window.addEventListener("resize", resizeRenderer);
+void refreshPolicyModels();

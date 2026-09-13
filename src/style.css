@@ -521,3 +521,21 @@ button:disabled {
   .topbar-meta span:first-child { display: none; }
   .statusbar span:last-child { display: none; }
 }
+
+.policy-state {
+  color: var(--muted);
+  font-family: "DM Mono", monospace;
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  line-height: 1.6;
+  margin: 10px 0 0;
+  text-transform: uppercase;
+}
+
+.policy-state.is-running {
+  color: var(--signal);
+}
+
+.policy-state.is-error {
+  color: var(--alert, #b4451f);
+}
