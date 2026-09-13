@@ -391,6 +391,7 @@ const resetButton = document.querySelector<HTMLButtonElement>("#reset-button")!;
 const recordingBadge = document.querySelector<HTMLDivElement>("#recording-badge")!;
 const frameCountElement = document.querySelector<HTMLElement>("#frame-count")!;
 const durationElement = document.querySelector<HTMLElement>("#duration")!;
+const captureHzElement = document.querySelector<HTMLElement>("#capture-hz")!;
 const statusElement = document.querySelector<HTMLElement>("#status-message")!;
 const previewElement = document.querySelector<HTMLImageElement>("#observation-preview")!;
 const robotBadgeElement = document.querySelector<HTMLElement>("#robot-badge")!;
@@ -401,6 +402,7 @@ const datasetButton = document.querySelector<HTMLButtonElement>("#dataset-button
 const episodeCountElement = document.querySelector<HTMLInputElement>("#episode-count")!;
 
 robotBadgeElement.textContent = `${spec.label} / SIM`;
+captureHzElement.textContent = String(CAPTURE_HZ).padStart(2, "0");
 
 const initialValues = Object.fromEntries(JOINTS.map((joint) => [joint.name, joint.initial])) as JointValues;
 /** What the arm is told to do. With dynamics on, what it actually does is `measuredValues`. */
@@ -1776,7 +1778,7 @@ type ScriptStep = {
 };
 type Script = { steps: ScriptStep[]; start: JointValues; total: number };
 
-// Demonstration speed, not the arm's limit. At 5 Hz capture this puts roughly 6 degrees
+// Demonstration speed, not the arm's limit. Raise CAPTURE_HZ when a policy needs
 // between consecutive actions; raise CAPTURE_HZ if a policy needs finer steps than that.
 const ARM_SPEED = 28; // deg/s
 const GRIPPER_SPEED = 90; // percent/s
