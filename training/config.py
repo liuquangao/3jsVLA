@@ -9,6 +9,9 @@ class TinyVLAConfig:
         "observation.images.top",
         "observation.images.gripper",
     )
+    # "delta" predicts joint movement from the observed pose; "absolute" predicts the pose
+    # itself. Checkpoints record this, and inference must undo exactly what training applied.
+    action_space: str = "delta"
     image_height: int = 192
     image_width: int = 256
     hidden_dim: int = 256

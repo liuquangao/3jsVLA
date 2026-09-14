@@ -23,6 +23,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--workers", type=int, default=0)
+    parser.add_argument(
+        "--action-space",
+        choices=("delta", "absolute"),
+        default=TinyVLAConfig.action_space,
+        help="predict joint movement from the observed pose, or the joint angles themselves",
+    )
     return parser.parse_args()
 
 
@@ -38,7 +44,7 @@ def move_batch(batch: dict, device: torch.device) -> dict:
 
 def main() -> None:
     args = parse_args()
-    config = TinyVLAConfig()
+    config = TinyVLAConfig(action_space=args.action_space)
     tokenizer = WordTokenizer()
     dataset = TinyVLADataset(args.repo_id, args.dataset_root, config)
     loader = DataLoader(

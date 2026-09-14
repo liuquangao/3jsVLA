@@ -58,7 +58,10 @@ def main() -> None:
     args = parser.parse_args()
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    config = TinyVLAConfig(**checkpoint["config"])
+    stored = dict(checkpoint["config"])
+    # Checkpoints trained before deltas existed predict absolute angles and say nothing about it.
+    stored.setdefault("action_space", "absolute")
+    config = TinyVLAConfig(**stored)
     tokenizer = WordTokenizer()
     tokenizer.words = tuple(checkpoint["vocabulary"])
     tokenizer.token_to_id = {word: index for index, word in enumerate(tokenizer.words)}
@@ -79,6 +82,7 @@ def main() -> None:
         "checkpoint": args.checkpoint.name,
         "device": str(device),
         "action_chunk": config.action_chunk,
+        "action_space": config.action_space,
         "cameras": [key.rsplit(".", 1)[-1] for key in config.camera_keys],
     }), flush=True)
 
@@ -92,13 +96,17 @@ def main() -> None:
                 key: prepare_image(request["images"][key.rsplit(".", 1)[-1]], config).unsqueeze(0).to(device)
                 for key in config.camera_keys
             }
-            state = torch.as_tensor(request["state"], dtype=torch.float32)
-            state = ((state - state_mean) / state_std).unsqueeze(0).to(device)
+            measured = torch.as_tensor(request["state"], dtype=torch.float32)
+            state = ((measured - state_mean) / state_std).unsqueeze(0).to(device)
             language_ids, language_mask = tokenizer.batch(
                 [request["task"]], config.max_language_tokens, device
             )
             actions = sample_actions(model, images, state, language_ids, language_mask)[0].cpu()
             actions = actions * action_std + action_mean
+            if config.action_space == "delta":
+                # The collector drives absolute targets, so anchor the predicted movement to the
+                # pose it was predicted from. Re-observing every chunk stops drift accumulating.
+                actions = actions + measured
             print(json.dumps({"actions": actions.tolist()}), flush=True)
         except Exception as error:  # one bad frame must not take the policy down
             print(json.dumps({"error": f"{type(error).__name__}: {error}"}), flush=True)
