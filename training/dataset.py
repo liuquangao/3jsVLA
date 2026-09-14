@@ -59,6 +59,11 @@ class TinyVLADataset(Dataset):
         states = table["observation.state"].float()
         actions = table["action"].float()
         episodes = table["episode_index"]
+        # Pairing rows by position is only valid while the table is in global index order. A
+        # reordered table would pair each state with someone else's action and quietly produce
+        # plausible but wrong statistics, so fail here instead.
+        if not torch.equal(table["index"], torch.arange(len(states))):
+            raise RuntimeError("LeRobot table is not in index order; delta statistics need it")
         # Chunks stop at the end of their own episode; LeRobot pads by repeating the last frame.
         last = torch.zeros_like(episodes)
         for episode in episodes.unique():
