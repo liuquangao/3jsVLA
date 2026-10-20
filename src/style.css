@@ -109,7 +109,7 @@ button {
 
 .workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 380px;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.5fr) 320px;
   min-height: 0;
   border-right: 1px solid var(--ink);
   border-left: 1px solid var(--ink);
@@ -522,7 +522,34 @@ button:disabled {
   .statusbar span:last-child { display: none; }
 }
 
-.policy-state {
+
+
+.pick-readout {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, 1fr);
+  margin: 12px 0;
+}
+
+.pick-readout div {
+  border: 1px solid var(--line, rgba(0, 0, 0, 0.12));
+  padding: 6px 8px;
+}
+
+.pick-readout dt {
+  color: var(--muted);
+  font-family: "DM Mono", monospace;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+
+.pick-readout dd {
+  font-family: "DM Mono", monospace;
+  font-size: 12px;
+  margin: 2px 0 0;
+}
+
+.pick-state {
   color: var(--muted);
   font-family: "DM Mono", monospace;
   font-size: 9px;
@@ -532,10 +559,66 @@ button:disabled {
   text-transform: uppercase;
 }
 
-.policy-state.is-running {
-  color: var(--signal);
+.pick-state.is-success { color: var(--signal); }
+.pick-state.is-error { color: #b4451f; }
+
+.pick-stage {
+  border-left: 1px solid var(--ink);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  padding: 18px 16px;
 }
 
-.policy-state.is-error {
-  color: var(--alert, #b4451f);
+.pick-images {
+  display: grid;
+  flex: 1;
+  gap: 12px;
+  grid-template-columns: 1fr 1fr;
+  min-height: 0;
+}
+
+.pick-image {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  margin: 0;
+  min-height: 0;
+}
+
+/*
+ * The element box must keep the camera's own 4:3, not be stretched by the column. A click is
+ * turned into a ray from its position within this rectangle, so a letterboxed or squashed box
+ * would aim the ray somewhere the operator did not click. Sizing by height and deriving the
+ * width keeps the box and the picture the same shape, and leaves `object-fit` nothing to do.
+ */
+.pick-image canvas {
+  aspect-ratio: 4 / 3;
+  background: #11120f;
+  border: 1px solid var(--ink);
+  cursor: crosshair;
+  display: block;
+  height: 100%;
+  margin: 0 auto;
+  max-width: 100%;
+  min-height: 0;
+  width: auto;
+}
+
+/* The centre camera is reference, not a click target. */
+.pick-image.is-context canvas {
+  cursor: default;
+}
+
+.pick-image figcaption small {
+  opacity: 0.6;
+}
+
+.pick-image figcaption {
+  color: var(--muted);
+  font-family: "DM Mono", monospace;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  margin-top: 5px;
 }

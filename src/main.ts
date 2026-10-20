@@ -10,30 +10,6 @@ import "./style.css";
 
 type JointValues = Record<string, number>;
 
-type EpisodeFrame = {
-  timestamp: number;
-  observation: {
-    images: {
-      top: string;
-      gripper: string;
-    };
-    joint_positions: JointValues;
-    /** Ground truth, for debugging and for scoring an evaluation run. */
-    object_poses: Array<{
-      id: PropId;
-      position: [number, number, number];
-      quaternion: [number, number, number, number];
-    }>;
-    grasped: PropId | null;
-  };
-  action: {
-    joint_targets: JointValues;
-  };
-};
-
-const round4 = (value: number) => Number(value.toFixed(4));
-
-/** One slider. `urdfJoints` are the URDF joints it drives, `toURDF` maps slider units to them. */
 type JointSpec = {
   name: string;
   label: string;
@@ -315,20 +291,6 @@ const JOINTS = spec.joints;
  * is zero.
  */
 const GRIPPER_SQUEEZE = 0.01;
-const GRIPPER_OPEN = 100;
-const GRIPPER_SHUT = spec.grasp.fullOpening
-  ? THREE.MathUtils.clamp(((spec.props.cube - GRIPPER_SQUEEZE) / spec.grasp.fullOpening) * 100, 0, 95)
-  : (spec.grasp.closedAt ?? 45);
-
-const CAPTURE_HZ = 10;
-const SAMPLE_INTERVAL = 1000 / CAPTURE_HZ;
-
-/**
- * The desk model is Y-up and stands on the floor with its work surface at y = 0.7875, so it is
- * dropped by exactly that to put the surface on our y = 0 work plane. Width and depth come from
- * the glTF bounding box; the collider is built from the same numbers so the visible top and the
- * one the cubes rest on cannot drift apart.
- */
 const DESK = { top: 0.7875, width: 2.0, depth: 0.9472 };
 
 /** Swapped per episode so the policy cannot use the backdrop as a position cue. */
@@ -359,8 +321,8 @@ const collisionGroups = (member: number, collidesWith: number) => (member << 16)
 const PROP_FREE_GROUPS = collisionGroups(GROUP_PROP, GROUP_ARM | GROUP_PROP | GROUP_WORLD);
 
 /** What the policy sees. The converter reads these back out of the dump's meta.json. */
-const OBSERVATION_WIDTH = 256;
-const OBSERVATION_HEIGHT = 192;
+const OBSERVATION_WIDTH = 640;
+const OBSERVATION_HEIGHT = 480;
 
 type PropId = "red" | "green" | "blue";
 const PROP_SPECS: Array<{ id: PropId; label: string; color: number }> = [
@@ -384,86 +346,24 @@ type Task = {
 };
 
 const sceneElement = document.querySelector<HTMLDivElement>("#scene")!;
-const controlsElement = document.querySelector<HTMLDivElement>("#joint-controls")!;
-const instructionElement = document.querySelector<HTMLTextAreaElement>("#instruction")!;
-const recordButton = document.querySelector<HTMLButtonElement>("#record-button")!;
-const stopButton = document.querySelector<HTMLButtonElement>("#stop-button")!;
-const replayButton = document.querySelector<HTMLButtonElement>("#replay-button")!;
-const downloadButton = document.querySelector<HTMLButtonElement>("#download-button")!;
 const resetButton = document.querySelector<HTMLButtonElement>("#reset-button")!;
-const recordingBadge = document.querySelector<HTMLDivElement>("#recording-badge")!;
-const frameCountElement = document.querySelector<HTMLElement>("#frame-count")!;
-const durationElement = document.querySelector<HTMLElement>("#duration")!;
-const captureHzElement = document.querySelector<HTMLElement>("#capture-hz")!;
+const newSceneButton = document.querySelector<HTMLButtonElement>("#new-scene-button")!;
+const jawOpenButton = document.querySelector<HTMLButtonElement>("#jaw-open-button")!;
+const jawCloseButton = document.querySelector<HTMLButtonElement>("#jaw-close-button")!;
 const statusElement = document.querySelector<HTMLElement>("#status-message")!;
-const previewElement = document.querySelector<HTMLImageElement>("#observation-preview")!;
 const robotBadgeElement = document.querySelector<HTMLElement>("#robot-badge")!;
-const newTaskButton = document.querySelector<HTMLButtonElement>("#new-task-button")!;
-const taskStateElement = document.querySelector<HTMLElement>("#task-state")!;
-const generateButton = document.querySelector<HTMLButtonElement>("#generate-button")!;
-const datasetButton = document.querySelector<HTMLButtonElement>("#dataset-button")!;
-const episodeCountElement = document.querySelector<HTMLInputElement>("#episode-count")!;
-const policyModelElement = document.querySelector<HTMLSelectElement>("#policy-model")!;
-const policyButton = document.querySelector<HTMLButtonElement>("#policy-button")!;
-const policyStopButton = document.querySelector<HTMLButtonElement>("#policy-stop-button")!;
-const policyStateElement = document.querySelector<HTMLElement>("#policy-state")!;
-
-robotBadgeElement.textContent = `${spec.label} / SIM`;
-captureHzElement.textContent = String(CAPTURE_HZ).padStart(2, "0");
 
 const initialValues = Object.fromEntries(JOINTS.map((joint) => [joint.name, joint.initial])) as JointValues;
 /** What the arm is told to do. With dynamics on, what it actually does is `measuredValues`. */
 const currentValues = { ...initialValues };
 const targetValues = { ...initialValues };
 const measuredValues = { ...initialValues };
-const sliders = new Map<string, HTMLInputElement>();
-const valueLabels = new Map<string, HTMLElement>();
 
 let task: Task = {
   target: "red",
   region: { shape: "circle", color: "yellow", center: [0, 0], radius: 0.075 },
   instruction: "",
 };
-let frames: EpisodeFrame[] = [];
-let dataset: Array<ReturnType<typeof buildEpisode>> = [];
-let script: {
-  plan: Script;
-  time: number;
-  tick: number;
-  /** Wall-clock guard against a simulation or capture step getting stuck. */
-  startedAt: number;
-  /** Which leg of the stack is running, and how much episode time the earlier legs used. */
-  stage: number;
-  clock: number;
-  wait?: number;
-} | null = null;
-let generation: {
-  requested: number;
-  completed: number;
-  succeeded: number;
-  attempted: number;
-  failed: number;
-  maxAttempts: number;
-  failureReasons: Record<string, number>;
-  /** Set while an episode is being flushed to disk; ticking resumes when it settles. */
-  flushing: boolean;
-} | null = null;
-let recording = false;
-let recordStart = 0;
-let lastSample = 0;
-let policy: {
-  model: string;
-  /** Actions still to execute from the last chunk, in slider units. */
-  queue: number[][];
-  /** True while a chunk request is in flight; the arm holds its last target until it lands. */
-  requesting: boolean;
-  lastStep: number;
-  steps: number;
-  chunks: number;
-} | null = null;
-let replaying = false;
-let replayStart = 0;
-let replayIndex = 0;
 
 const scene = new THREE.Scene();
 
@@ -755,51 +655,6 @@ function touching(a: RAPIER.Collider, b: RAPIER.Collider, requireForce = false) 
   return hit;
 }
 
-function contactAndMotorDiagnostic() {
-  const contacts: unknown[] = [];
-  for (const prop of props) {
-    fingerColliders.forEach((finger, fingerIndex) => {
-      physics.contactPair(prop.collider, finger, (manifold) => {
-        contacts.push({
-          prop: prop.id,
-          finger: fingerIndex,
-          currentDistanceMm: prop.collider.contactCollider(finger, 0.05)?.distance !== undefined
-            ? prop.collider.contactCollider(finger, 0.05)!.distance * 1000 : null,
-          distancesMm: Array.from({ length: manifold.numContacts() }, (_, i) => manifold.contactDist(i) * 1000),
-          impulsesNs: Array.from({ length: manifold.numContacts() }, (_, i) => manifold.contactImpulse(i)),
-          solverDistancesMm: Array.from({ length: manifold.numSolverContacts() }, (_, i) => manifold.solverContactDist(i) * 1000),
-        });
-      });
-    });
-  }
-  const shoulder = armJoints?.get("arm_joint2");
-  if (!shoulder) return { contacts };
-  const rotation = shoulder.parent.rotation();
-  const q = new THREE.Quaternion(rotation.x, rotation.y, rotation.z, rotation.w);
-  const at = shoulder.parent.translation();
-  const anchor = shoulder.anchor.clone().applyQuaternion(q).add(new THREE.Vector3(at.x, at.y, at.z));
-  const axis = shoulder.axis.clone().applyQuaternion(q).normalize();
-  const gravityTorque = shoulder.load.reduce((sum, body) => {
-    const com = body.worldCom();
-    return sum + new THREE.Vector3(com.x, com.y, com.z).sub(anchor)
-      .cross(new THREE.Vector3(0, -9.81 * body.mass(), 0)).dot(axis);
-  }, 0);
-  const compensation = THREE.MathUtils.clamp(-gravityTorque, -shoulder.maxEffort, shoulder.maxEffort);
-  return {
-    contacts,
-    shoulder: {
-      gravityTorqueNm: gravityTorque,
-      compensationNm: compensation,
-      motorHeadroomNm: Math.max(0, shoulder.maxEffort - Math.abs(compensation)),
-      effortLimitNm: shoulder.maxEffort,
-      gains: shoulder.gains,
-      proportionalTorqueNm: shoulder.gains[0] * revolute(currentValues.arm_joint2 - measuredValues.arm_joint2),
-      carriedMassKg: shoulder.load.reduce((sum, body) => sum + body.mass(), 0),
-      loadBodies: shoulder.load.length,
-    },
-  };
-}
-
 function findGrippedProp() {
   if (fingerColliders.length < 2) return null;
   return props.find((prop) => bothFingersGrip(fingerColliders.map((finger) => touching(prop.collider, finger, true)))) ?? null;
@@ -874,7 +729,6 @@ const armLinkBodies = new Map<string, RAPIER.RigidBody>();
 /** Cap on hull points per link: the STLs run to tens of thousands of vertices and the hull of a
  *  dense mesh is unchanged by sampling it. */
 const HULL_POINT_BUDGET = 4000;
-
 
 type ArmJoint = {
   joint: RAPIER.RevoluteImpulseJoint | RAPIER.PrismaticImpulseJoint;
@@ -1326,43 +1180,6 @@ function resetArmPhysics(values: JointValues) {
   commandArm(values);
 }
 
-function buildJointControls() {
-  for (const joint of JOINTS) {
-    const row = document.createElement("div");
-    row.className = "joint-row";
-    const label = document.createElement("label");
-    label.htmlFor = `joint-${joint.name}`;
-    label.textContent = joint.label;
-    const input = document.createElement("input");
-    input.id = `joint-${joint.name}`;
-    input.type = "range";
-    input.min = String(joint.min);
-    input.max = String(joint.max);
-    input.step = "1";
-    input.value = String(joint.initial);
-    const value = document.createElement("span");
-    value.className = "joint-value";
-    value.textContent = formatJointValue(joint.name, joint.initial);
-    input.addEventListener("input", () => {
-      targetValues[joint.name] = Number(input.value);
-      value.textContent = formatJointValue(joint.name, targetValues[joint.name]);
-    });
-    row.append(label, input, value);
-    controlsElement.append(row);
-    sliders.set(joint.name, input);
-    valueLabels.set(joint.name, value);
-  }
-}
-
-function formatJointValue(name: string, value: number) {
-  const joint = JOINTS.find((entry) => entry.name === name)!;
-  return joint.unit === "percent" ? `${Math.round(value)}%` : `${Math.round(value)}°`;
-}
-
-/**
- * Drives the arm to a commanded pose. With dynamics the motors are aimed and the solver decides
- * what actually happens; without it the angles are written straight into the URDF tree.
- */
 function setRobotPose(values: JointValues) {
   if (armJoints) {
     commandArm(values);
@@ -1372,34 +1189,6 @@ function setRobotPose(values: JointValues) {
     setURDFJoint(robot, joint, values[joint.name]);
     measuredValues[joint.name] = values[joint.name];
   }
-}
-
-function updateJointUI(values: JointValues) {
-  for (const joint of JOINTS) {
-    sliders.get(joint.name)!.value = String(values[joint.name]);
-    valueLabels.get(joint.name)!.textContent = formatJointValue(joint.name, values[joint.name]);
-  }
-}
-
-function cloneJointValues(values: JointValues): JointValues {
-  return { ...values };
-}
-
-function startRecording() {
-  frames = [];
-  recording = true;
-  replaying = false;
-  recordStart = performance.now();
-  lastSample = recordStart - SAMPLE_INTERVAL;
-  recordButton.classList.add("is-recording");
-  recordButton.disabled = true;
-  stopButton.disabled = false;
-  replayButton.disabled = true;
-  downloadButton.disabled = true;
-  instructionElement.disabled = true;
-  recordingBadge.hidden = false;
-  statusElement.textContent = "RECORDING — move the joint controls";
-  updateStats(0);
 }
 
 type SensorView = "wrist" | "overhead";
@@ -1513,127 +1302,6 @@ function renderSensorPreviews(now: number) {
     const canvas = sensorCanvases.get(id)!;
     canvas.getContext("2d")!.drawImage(observationRenderer.domElement, 0, 0, canvas.width, canvas.height);
   }
-}
-
-function stopRecording() {
-  if (!recording) return;
-  recording = false;
-  recordButton.classList.remove("is-recording");
-  recordButton.disabled = false;
-  stopButton.disabled = true;
-  replayButton.disabled = frames.length === 0;
-  downloadButton.disabled = frames.length === 0;
-  instructionElement.disabled = false;
-  recordingBadge.hidden = true;
-  statusElement.textContent = `EPISODE READY — ${frames.length} frames captured`;
-}
-
-/** Renders one physical sensor camera and returns its JPEG observation. */
-function renderObservation(view: THREE.Camera) {
-  renderObservationView(view);
-  return observationRenderer.domElement.toDataURL("image/jpeg", 0.72);
-}
-
-function captureFrame(seconds: number) {
-  const images = {
-    top: renderObservation(sensorCameras.get("overhead")!),
-    gripper: renderObservation(sensorCameras.get("wrist")!),
-  };
-  frames.push({
-    timestamp: Number(seconds.toFixed(3)),
-    observation: {
-      images,
-      joint_positions: cloneJointValues(measuredValues),
-      object_poses: props.map((prop) => ({
-        id: prop.id,
-        position: prop.mesh.position.toArray().map(round4) as [number, number, number],
-        quaternion: prop.mesh.quaternion.toArray().map(round4) as [number, number, number, number],
-      })),
-      grasped: gripped?.id ?? null,
-    },
-    action: {
-      joint_targets: cloneJointValues(targetValues),
-    },
-  });
-  previewElement.src = images.top;
-  updateStats(seconds * 1000);
-}
-
-function updateStats(elapsedMs: number) {
-  frameCountElement.textContent = String(frames.length).padStart(3, "0");
-  durationElement.textContent = (elapsedMs / 1000).toFixed(1).padStart(4, "0");
-}
-
-function replayEpisode() {
-  if (frames.length === 0) return;
-  replaying = true;
-  recording = false;
-  replayStart = performance.now();
-  replayIndex = 0;
-  replayButton.disabled = true;
-  recordButton.disabled = true;
-  resetButton.disabled = true;
-  statusElement.textContent = "REPLAYING CAPTURED EPISODE";
-}
-
-function updateReplay(now: number) {
-  const elapsed = (now - replayStart) / 1000;
-  while (replayIndex < frames.length && frames[replayIndex].timestamp <= elapsed) {
-    Object.assign(currentValues, frames[replayIndex].observation.joint_positions);
-    Object.assign(targetValues, currentValues);
-    previewElement.src = frames[replayIndex].observation.images.top;
-    updateJointUI(currentValues);
-    replayIndex += 1;
-  }
-  if (replayIndex >= frames.length) {
-    replaying = false;
-    replayButton.disabled = false;
-    recordButton.disabled = false;
-    resetButton.disabled = false;
-    statusElement.textContent = "REPLAY COMPLETE";
-  }
-}
-
-function buildEpisode() {
-  return {
-    format: "3jsvla.episode.v3",
-    robot: spec.id,
-    instruction: instructionElement.value.trim(),
-    task: { target: task.target, region: task.region },
-    capture_hz: CAPTURE_HZ,
-    success: taskSucceeded(),
-    created_at: new Date().toISOString(),
-    frames,
-  };
-}
-
-function downloadJSON(payload: unknown, name: string) {
-  const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = name;
-  link.click();
-  URL.revokeObjectURL(url);
-}
-
-function downloadEpisode() {
-  downloadJSON(buildEpisode(), `${spec.id}_episode_${Date.now()}.json`);
-  statusElement.textContent = "EPISODE DOWNLOADED";
-}
-
-function downloadDataset() {
-  downloadJSON(
-    {
-      format: "3jsvla.dataset.v1",
-      robot: spec.id,
-      capture_hz: CAPTURE_HZ,
-      created_at: new Date().toISOString(),
-      episodes: dataset,
-    },
-    `${spec.id}_dataset_${dataset.length}ep_${Date.now()}.json`,
-  );
-  statusElement.textContent = `DATASET DOWNLOADED — ${dataset.length} EPISODES`;
 }
 
 function rollTask(center: THREE.Vector2): Task {
@@ -1762,756 +1430,247 @@ function newEpisode() {
   // forces the visual encoder onto the desk and the props.
   useBackdrop(Math.floor(Math.random() * backdrops.length));
   task = rollTask(layout.target.at);
-  instructionElement.value = task.instruction;
-  frames = [];
-  replayButton.disabled = true;
-  downloadButton.disabled = true;
-  updateStats(0);
-  // Refresh the preview so it shows the scene you are actually looking at. Skipped while
-  // generating, where the episode's own first capture lands a frame a moment later anyway.
-  if (!generation) previewElement.src = renderObservation(sensorCameras.get("overhead")!);
-  statusElement.textContent = "NEW TASK — adjust a joint, then start recording";
+  statusElement.textContent = "NEW SCENE — drag a joint, or click the side and top views";
   return true;
-}
-
-function taskSucceeded() {
-  if (gripped) return false;
-  const cube = spec.props.cube;
-  const prop = props.find((entry) => entry.id === task.target)!;
-  const [x, z] = task.region.center;
-  const fullyInside = Math.hypot(prop.mesh.position.x - x, prop.mesh.position.z - z)
-    <= task.region.radius - cube * Math.SQRT2 / 2;
-  const onTable = Math.abs(prop.mesh.position.y - cube / 2) <= cube * 0.2;
-  const velocity = prop.body.linvel();
-  return fullyInside && onTable && Math.hypot(velocity.x, velocity.y, velocity.z) <= 0.03;
-}
-
-function updateTaskState() {
-  const done = taskSucceeded();
-  taskStateElement.textContent = done ? "In target" : "Not in target";
-  taskStateElement.classList.toggle("is-success", done);
-}
-
-/** One leg of the scripted trajectory: ease to `pose` over `duration` seconds. */
-type ScriptStep = {
-  pose: JointValues;
-  duration: number;
-  cartesian?: { from: THREE.Vector3; to: THREE.Vector3; pitch: number; azimuth: number; gripper: number };
-  gripHold?: { target: PropId; min: number; max: number };
-  completion?: "joint";
-};
-type Script = { steps: ScriptStep[]; start: JointValues; total: number };
-
-// Demonstration speeds, not the arm's hardware limits. Cartesian segments are
-// kept separate so vertical grasp and placement motion does not inherit a slow
-// joint-space duration.
-const ARM_SPEED = 28; // deg/s
-const CARTESIAN_SPEED = 0.05; // m/s
-const GRIPPER_SPEED = 90; // percent/s
-
-function stepDuration(from: JointValues, to: JointValues) {
-  let seconds = 0.2;
-  for (const joint of JOINTS) {
-    const delta = Math.abs(to[joint.name] - from[joint.name]);
-    seconds = Math.max(seconds, delta / (joint.unit === "percent" ? GRIPPER_SPEED : ARM_SPEED));
-  }
-  return seconds;
-}
-
-function buildTransfer(sourceId: PropId, destination: THREE.Vector2): Script | null {
-  if (!spec.solve) return null;
-  const source = props.find((entry) => entry.id === sourceId)!;
-  const cube = spec.props.cube;
-
-  const sourceAt = source.body.translation();
-  const sourceYaw = new THREE.Euler().setFromQuaternion(source.mesh.quaternion, "YXZ").y;
-
-  const grasp = new THREE.Vector3(sourceAt.x, sourceAt.y, sourceAt.z);
-  const place = new THREE.Vector3(
-    destination.x,
-    cube / 2 + 0.002,
-    destination.y,
-  );
-
-  const plan = ((): Array<{ pose: JointValues; hold?: number; gripHold?: ScriptStep["gripHold"]; completion?: ScriptStep["completion"] }> | null => {
-    // Keep the lateral transfer clearly above the cubes, while retaining lower
-    // fallbacks for targets near the edge of the reachable workspace.
-    for (let hover = 0.065; hover >= 0.0475; hover -= 0.00875) {
-      const overSource = grasp.clone().setY(grasp.y + hover);
-      const overPlace = place.clone().setY(place.y + hover);
-      const pitch = Math.PI / 2;
-        let ikSeed = { ...currentValues };
-        const at = (point: THREE.Vector3, gripper: number) => {
-          const solution = spec.solve!(spec.mount, point, pitch, sourceYaw, ikSeed);
-          if (solution) ikSeed = solution;
-          return solution ? { ...solution, gripper } : null;
-        };
-        // Hold poses to let the jaws establish contact and placed cubes settle.
-        const attempt: Array<{ pose: JointValues | null; hold?: number; gripHold?: ScriptStep["gripHold"]; completion?: ScriptStep["completion"] }> = [
-          { pose: at(overSource, GRIPPER_OPEN) },
-          { pose: at(grasp, GRIPPER_OPEN) },
-          { pose: at(grasp, GRIPPER_SHUT) },
-          { pose: at(grasp, GRIPPER_SHUT), hold: 0.8, gripHold: { target: sourceId, min: 0.15, max: 0.8 } },
-          { pose: at(overSource, GRIPPER_SHUT) },
-          { pose: at(overPlace, GRIPPER_SHUT) },
-          { pose: at(place, GRIPPER_SHUT) },
-          { pose: at(place, GRIPPER_SHUT), hold: 0.6 },
-          { pose: at(place, GRIPPER_OPEN) },
-          { pose: at(place, GRIPPER_OPEN), hold: 0.8 },
-          { pose: at(overPlace, GRIPPER_OPEN) },
-          { pose: at(overPlace, GRIPPER_OPEN), hold: 0.5 },
-          // End every completed demonstration in the same neutral state it began in.
-          { pose: { ...initialValues }, completion: "joint" },
-        ];
-        if (attempt.every((entry) => entry.pose !== null)) {
-          return attempt as Array<{ pose: JointValues; hold?: number; gripHold?: ScriptStep["gripHold"]; completion?: ScriptStep["completion"] }>;
-        }
-    }
-    return null;
-  })();
-  if (!plan) return null;
-
-  const start = { ...currentValues };
-  let previous = start;
-  let total = 0;
-  const steps = plan.map((entry) => {
-    const pose = entry.pose;
-    const duration = entry.hold ?? stepDuration(previous, pose);
-    previous = pose;
-    total += duration;
-    return { pose, duration, gripHold: entry.gripHold, completion: entry.completion };
-  });
-  // Keep each vertical approach/retraction straight in task space. Joint interpolation
-  // between two valid IK solutions otherwise sweeps the fingers sideways into the cube.
-  const tcpAt = (pose: JointValues) => {
-    return constrainedIK!.forwardPose(pose).position;
-  };
-  const trajectory: ScriptStep[] = steps;
-  for (const index of [1, 4, 6, 10]) {
-    const from = tcpAt(steps[index - 1].pose);
-    const to = tcpAt(steps[index].pose);
-    const azimuth = sourceYaw;
-    const gripper = steps[index].pose.gripper;
-    const toolForward = new THREE.Vector3(1, 0, 0)
-      .applyQuaternion(constrainedIK!.forwardPose(steps[index].pose).rotation);
-    const pitch = Math.asin(THREE.MathUtils.clamp(-toolForward.y, -1, 1));
-    // Reject paths with unreachable intermediate points before starting the motion.
-    let pathSeed = steps[index - 1].pose;
-    for (let sample = 0; sample <= 20; sample += 1) {
-      const solution = spec.solve(spec.mount, from.clone().lerp(to, sample / 20), pitch, azimuth, pathSeed);
-      if (!solution) return null;
-      pathSeed = solution;
-    }
-    trajectory[index].cartesian = { from, to, pitch, azimuth, gripper };
-    const duration = Math.max(steps[index].duration, from.distanceTo(to) / CARTESIAN_SPEED);
-    total += duration - steps[index].duration;
-    steps[index].duration = duration;
-  }
-  return { steps: trajectory, start, total };
-}
-
-/** The commanded pose at a point in the script, eased between waypoints. */
-function poseAt(script: Script, time: number): JointValues {
-  let previous = script.start;
-  let clock = 0;
-  for (const step of script.steps) {
-    if (time < clock + step.duration) {
-      const alpha = THREE.MathUtils.smoothstep((time - clock) / step.duration, 0, 1);
-      if (step.cartesian) {
-        const { from, to, pitch, azimuth, gripper } = step.cartesian;
-        const solution = spec.solve!(spec.mount, from.clone().lerp(to, alpha), pitch, azimuth, currentValues);
-        if (!solution) throw new Error("Cartesian grasp path became unreachable");
-        return { ...solution, gripper };
-      }
-      const pose: JointValues = {};
-      for (const joint of JOINTS) {
-        pose[joint.name] = THREE.MathUtils.lerp(previous[joint.name], step.pose[joint.name], alpha);
-      }
-      return pose;
-    }
-    clock += step.duration;
-    previous = step.pose;
-  }
-  return { ...previous };
 }
 
 function resetPose() {
   Object.assign(currentValues, initialValues);
   Object.assign(targetValues, initialValues);
-  updateJointUI(initialValues);
   resetArmPhysics(initialValues);
   setRobotPose(initialValues);
   statusElement.textContent = "POSE RESET";
 }
 
 /**
- * Streams episodes to a folder the user picks, one directory each, images as plain JPEG files.
- * The alternative — accumulating everything and handing over one JSON blob — holds the whole
- * dataset in memory and pays a third again in size for base64, which stops being reasonable at
- * a couple of hundred episodes. `tools/to_lerobot.py` turns this tree into a LeRobotDataset.
+ * Two axis-aligned orthographic views that together name a point in space, plus the centre
+ * camera for context.
+ *
+ * Orthographic projection is what makes two clicks enough: every ray through a pixel is parallel
+ * to the view axis, so the coordinates read across the image do not depend on how far away the
+ * surface under the cursor is. The top view therefore fixes X and Z, the side view fixes Y, and
+ * no depth has to be guessed. The centre camera is deliberately not clickable; it is there to
+ * say which cube is which, a question the flat grey orthographic views answer poorly.
+ *
+ * All three are drawn through `renderObservationView`, so they are lit exactly like the main
+ * scene. A second WebGLRenderer cannot be used here: the environment map is a PMREM texture
+ * belonging to one WebGL context, and sampling it from another silently drops the lighting.
  */
-declare global {
-  // Not in TypeScript's DOM lib yet; everything else the writer touches already is.
-  interface Window {
-    showDirectoryPicker(options?: { mode?: "read" | "readwrite" }): Promise<FileSystemDirectoryHandle>;
-  }
-}
+/** Framed on the reachable workspace, so a pixel is worth about a millimetre. */
+const PICK_REACH = spec.reach.max + 0.08;
+const PICK_EYE_HEIGHT = 0.18;
+const PICK_ASPECT = OBSERVATION_WIDTH / OBSERVATION_HEIGHT;
+// Wide enough that the reach circle fits across the shorter screen axis of either view.
+const PICK_HALF_WIDTH = PICK_REACH * PICK_ASPECT;
+const PICK_HALF_HEIGHT = PICK_REACH;
 
-type DiskWriter = {
-  root: FileSystemDirectoryHandle;
-  episodes: FileSystemDirectoryHandle;
-} | {
-  root: { name: string };
-  localRun: string;
-  convertToLerobot: boolean;
-};
-
-let writer: DiskWriter | null = null;
-
-const canWriteToDisk = () => "showDirectoryPicker" in window;
-
-async function postDataset(route: string, payload: unknown) {
-  const response = await fetch(`/__dataset/${route}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error ?? "Dataset write failed");
-  return result;
-}
-
-async function writeMetadata(contents: string) {
-  const destination = writer!;
-  if ("localRun" in destination) {
-    await postDataset("meta", { run: destination.localRun, meta: JSON.parse(contents) });
-  } else {
-    await writeFile(destination.root, "meta.json", contents);
-  }
-}
-
-/** JPEG data URL to bytes, so a frame can be written without a round trip through base64. */
-function dataUrlToBlob(dataUrl: string) {
-  const binary = atob(dataUrl.slice(dataUrl.indexOf(",") + 1));
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-  return new Blob([bytes], { type: "image/jpeg" });
-}
-
-async function writeFile(directory: FileSystemDirectoryHandle, name: string, contents: Blob | string) {
-  const handle = await directory.getFileHandle(name, { create: true });
-  const stream = await handle.createWritable();
-  await stream.write(contents);
-  await stream.close();
-}
-
-/** Writes one episode as its own directory: the frames as JPEGs, everything else as JSON. */
-async function writeEpisode(episode: ReturnType<typeof buildEpisode>, index: number) {
-  const destination = writer!;
-  if ("localRun" in destination) {
-    await postDataset("episode", { run: destination.localRun, index, episode });
-    return;
-  }
-  const name = `episode_${String(index).padStart(5, "0")}`;
-  const directory = await destination.episodes.getDirectoryHandle(name, { create: true });
-  const frameDirectory = await directory.getDirectoryHandle("frames", { create: true });
-  const topDirectory = await frameDirectory.getDirectoryHandle("top", { create: true });
-  const gripperDirectory = await frameDirectory.getDirectoryHandle("gripper", { create: true });
-
-  const record = {
-    ...episode,
-    frames: await Promise.all(
-      episode.frames.map(async (frame, frameIndex) => {
-        const file = `${String(frameIndex).padStart(6, "0")}.jpg`;
-        await Promise.all([
-          writeFile(topDirectory, file, dataUrlToBlob(frame.observation.images.top)),
-          writeFile(gripperDirectory, file, dataUrlToBlob(frame.observation.images.gripper)),
-        ]);
-        const { images: _images, ...observation } = frame.observation;
-        return {
-          ...frame,
-          observation: {
-            ...observation,
-            image_paths: { top: `frames/top/${file}`, gripper: `frames/gripper/${file}` },
-          },
-        };
-      }),
-    ),
-  };
-  await writeFile(directory, "episode.json", JSON.stringify(record));
-}
-
-async function writeDatasetMeta(summary: {
-  completed: number;
-  succeeded: number;
-  attempted: number;
-  failed: number;
-  failureReasons: Record<string, number>;
-}) {
-  await writeMetadata(
-    JSON.stringify(
-      {
-        format: "3jsvla.dump.v1",
-        robot: spec.id,
-        capture_hz: CAPTURE_HZ,
-        image: { width: OBSERVATION_WIDTH, height: OBSERVATION_HEIGHT },
-        joints: JOINTS.map((joint) => joint.name),
-        episodes: summary.completed,
-        successes: summary.succeeded,
-        attempts: summary.attempted,
-        failures: summary.failed,
-        failure_reasons: summary.failureReasons,
-        created_at: new Date().toISOString(),
-      },
-      null,
-      2,
-    ),
+function orthoView(aimedAt: THREE.Vector3, from: THREE.Vector3, up: THREE.Vector3) {
+  const view = new THREE.OrthographicCamera(
+    -PICK_HALF_WIDTH, PICK_HALF_WIDTH, PICK_HALF_HEIGHT, -PICK_HALF_HEIGHT, 0.01, 12,
   );
+  view.position.copy(from);
+  view.up.copy(up);
+  view.lookAt(aimedAt);
+  view.updateMatrixWorld(true);
+  return view;
+}
+
+/** Looks along -Z, so screen right is +X and screen up is +Y. */
+const sideCamera = orthoView(
+  new THREE.Vector3(spec.mount[0], PICK_EYE_HEIGHT, spec.mount[2]),
+  new THREE.Vector3(spec.mount[0], PICK_EYE_HEIGHT, spec.mount[2] + 3),
+  new THREE.Vector3(0, 1, 0),
+);
+/**
+ * Looks straight down. The up vector is -Z, not +Z: a camera's right axis is `up x forward`, so
+ * +Z here would point screen-right at -X and mirror this view against the side view. -Z also
+ * puts "away from the side view's eye" at the top of the picture, so the two views agree on
+ * which way the scene faces.
+ */
+const topCamera = orthoView(
+  new THREE.Vector3(spec.mount[0], 0, spec.mount[2]),
+  new THREE.Vector3(spec.mount[0], 3, spec.mount[2]),
+  new THREE.Vector3(0, 0, -1),
+);
+
+const sideCanvas = document.querySelector<HTMLCanvasElement>("#view-side")!;
+const topCanvas = document.querySelector<HTMLCanvasElement>("#view-top")!;
+const contextCanvas = document.querySelector<HTMLCanvasElement>("#view-context")!;
+const pickReadout = {
+  x: document.querySelector<HTMLElement>("#pick-x")!,
+  y: document.querySelector<HTMLElement>("#pick-y")!,
+  z: document.querySelector<HTMLElement>("#pick-z")!,
+};
+const pickMoveButton = document.querySelector<HTMLButtonElement>("#pick-move-button")!;
+const pickClearButton = document.querySelector<HTMLButtonElement>("#pick-clear-button")!;
+const pickStateElement = document.querySelector<HTMLElement>("#pick-state")!;
+
+const pickMarker = new THREE.Group();
+const pickDot = new THREE.Mesh(
+  new THREE.SphereGeometry(0.008, 16, 12),
+  new THREE.MeshBasicMaterial({ color: 0xec542f, toneMapped: false, depthTest: false }),
+);
+pickDot.renderOrder = 1001;
+pickMarker.add(pickDot);
+for (const axis of [[0.05, 0, 0], [0, 0.05, 0], [0, 0, 0.05]]) {
+  const arm = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(-axis[0], -axis[1], -axis[2]),
+      new THREE.Vector3(axis[0], axis[1], axis[2]),
+    ]),
+    new THREE.LineBasicMaterial({ color: 0xec542f, toneMapped: false, depthTest: false }),
+  );
+  arm.renderOrder = 1001;
+  pickMarker.add(arm);
+}
+pickMarker.visible = false;
+scene.add(pickMarker);
+
+/** What has been picked so far. Y comes from the side view, X and Z from the top view. */
+let pickHeight: number | null = null;
+let pickGround: { x: number; z: number } | null = null;
+let lastPickRender = -Infinity;
+
+function pickedPoint() {
+  if (pickHeight === null || pickGround === null) return null;
+  return new THREE.Vector3(pickGround.x, pickHeight, pickGround.z);
+}
+
+/** Pixel to world, through the clicked view's own projection. */
+function unprojectClick(event: MouseEvent, canvas: HTMLCanvasElement, view: THREE.Camera) {
+  const bounds = canvas.getBoundingClientRect();
+  return new THREE.Vector3(
+    ((event.clientX - bounds.left) / bounds.width) * 2 - 1,
+    -((event.clientY - bounds.top) / bounds.height) * 2 + 1,
+    -1,
+  ).unproject(view);
+}
+
+function setPickState(message: string, kind: "idle" | "ok" | "error" = "idle") {
+  pickStateElement.textContent = message;
+  pickStateElement.classList.toggle("is-success", kind === "ok");
+  pickStateElement.classList.toggle("is-error", kind === "error");
+}
+
+function updatePickUI() {
+  const point = pickedPoint();
+  pickReadout.x.textContent = pickGround ? `${pickGround.x.toFixed(3)} m` : "—";
+  pickReadout.y.textContent = pickHeight === null ? "—" : `${pickHeight.toFixed(3)} m`;
+  pickReadout.z.textContent = pickGround ? `${pickGround.z.toFixed(3)} m` : "—";
+  pickMoveButton.disabled = point === null;
+  pickClearButton.disabled = pickHeight === null && pickGround === null;
+  pickMarker.visible = point !== null;
+  if (point) pickMarker.position.copy(point);
+}
+
+function clearPick() {
+  pickHeight = null;
+  pickGround = null;
+  updatePickUI();
+  setPickState("Click the top view for the floor position, the side view for the height.");
+}
+
+/** The picker only places the wrist, so the jaws are driven separately. */
+function setJaws(open: boolean) {
+  const jaw = JOINTS.find((joint) => joint.name === "gripper");
+  if (!jaw) return;
+  targetValues[jaw.name] = open ? jaw.max : jaw.min;
+  setPickState(open ? "Jaws opening." : "Jaws closing.");
 }
 
 /**
- * Generated episodes run on a fixed simulated clock rather than wall time, so the dataset is the
- * same however fast the browser happens to be, and pausing the tab cannot stretch a trajectory.
+ * Sends the gripper midpoint to the picked point.
+ *
+ * A straight-down approach is tried first because that is how the jaws reach a table. Shallower
+ * pitches are fallbacks for points the wrist cannot stand over, and the angle that worked is
+ * reported so an awkward solution is visible rather than silent.
  */
-const GENERATION_DT = PHYSICS_STEP * 2;
-const TICKS_PER_CAPTURE = Math.round(1 / (CAPTURE_HZ * GENERATION_DT));
-/** Ticks are processed in slices, so the page keeps rendering and you can watch it collect. */
-const GENERATION_BUDGET_MS = 8;
-const EPISODE_TIMEOUT_MS = 60_000;
-const MAX_REACHABLE_LAYOUT_SAMPLES = 32;
-
-function startGeneratedEpisode() {
-  // Layout sampling is preparation, not an executed attempt. Only expose a
-  // scene to the generator after its complete pick-and-place path is reachable.
-  for (let sample = 0; sample < MAX_REACHABLE_LAYOUT_SAMPLES; sample += 1) {
-    if (!newEpisode()) continue;
-    const plan = buildTransfer(task.target, new THREE.Vector2(...task.region.center));
-    if (plan) {
-      script = { plan, time: 0, tick: 0, startedAt: performance.now(), stage: 0, clock: 0 };
-      return true;
-    }
-  }
-  return false;
-}
-
-/** One deterministic tick. Returns false once the script has run out. */
-function advanceScript() {
-  if (!script) return false;
-  const { plan } = script;
-
-  Object.assign(currentValues, poseAt(plan, script.time));
-  // The action is the command one capture interval ahead — what a policy would have to emit.
-  Object.assign(targetValues, poseAt(plan, Math.min(script.time + 1 / CAPTURE_HZ, plan.total)));
-
-  setRobotPose(currentValues);
-  stepPhysics(GENERATION_DT);
-  syncArmFromPhysics();
-  updateGrasp();
-
-  if (script.tick % TICKS_PER_CAPTURE === 0) captureFrame(script.clock + script.time);
-  script.tick += 1;
-  let boundary = 0;
-  for (const step of plan.steps) {
-    boundary += step.duration;
-    if (boundary <= script.time) continue;
-    if (step.gripHold) {
-      const stepStart = boundary - step.duration;
-      const elapsed = Math.max(0, script.time - stepStart);
-      script.wait = gripped?.id === step.gripHold.target ? (script.wait ?? 0) + GENERATION_DT : 0;
-      if (script.wait >= step.gripHold.min) {
-        const shortened = Math.max(GENERATION_DT, elapsed);
-        plan.total -= step.duration - shortened;
-        boundary = stepStart + shortened;
-        step.duration = shortened;
-        script.wait = 0;
-        break;
-      }
-      if (elapsed >= step.gripHold.max) {
-        throw new Error(`GRIP TIMEOUT - ${step.gripHold.target.toUpperCase()} cube did not establish a stable bilateral grip`);
-      }
-      break;
-    }
-    if (step.cartesian && step.cartesian.gripper === GRIPPER_OPEN &&
-        step.cartesian.to.y < step.cartesian.from.y &&
-        props.some((prop) => fingerColliders.some((finger) => touching(prop.collider, finger)))) {
-      throw new Error("APPROACH COLLISION - a finger touched a cube before closing");
-    }
-    if (script.time + GENERATION_DT >= boundary) {
-      // Redundant joint errors can cancel at the tool. Gate A1Z waypoints on the
-      // actual TCP pose, which is the task-space quantity the IK was asked to reach.
-      const gripperReached = step.pose.gripper < GRIPPER_OPEN
-        || Math.abs(measuredValues.gripper - step.pose.gripper) <= 3;
-      const jointReached = JOINTS.every((joint) => joint.unit === "percent"
-        || Math.abs(measuredValues[joint.name] - step.pose[joint.name]) <= 0.5);
-      let tcpReached = constrainedIK === null;
-      let orientationReached = constrainedIK === null;
-      const wristBody = armLinkBodies.get("arm_link6");
-      const expectedPose = constrainedIK?.forwardPose(step.pose);
-      if (expectedPose && wristBody) {
-        const at = wristBody.translation();
-        const rot = wristBody.rotation();
-        const actualRotation = new THREE.Quaternion(rot.x, rot.y, rot.z, rot.w);
-        const actual = new THREE.Vector3(A1Z_JAW_ANCHOR, 0, 0)
-          .applyQuaternion(actualRotation)
-          .add(new THREE.Vector3(at.x, at.y, at.z));
-        tcpReached = actual.distanceTo(expectedPose.position) <= 0.001;
-        orientationReached = actualRotation.angleTo(expectedPose.rotation) <= revolute(0.75);
-      }
-      const reached = gripperReached && (constrainedIK ? tcpReached && orientationReached : jointReached);
-      const reachedForStep = step.completion === "joint"
-        ? gripperReached && jointReached
-        : reached;
-      if (!reachedForStep) {
-        script.wait = (script.wait ?? 0) + GENERATION_DT;
-        if (script.wait > 3) {
-          const expected = constrainedIK?.forwardPose(step.pose);
-          const bodyAt = wristBody?.translation();
-          const bodyRot = wristBody?.rotation();
-          const actualRotation = bodyRot ? new THREE.Quaternion(bodyRot.x, bodyRot.y, bodyRot.z, bodyRot.w) : null;
-          const actualTCP = bodyAt && actualRotation ? new THREE.Vector3(A1Z_JAW_ANCHOR, 0, 0)
-            .applyQuaternion(actualRotation).add(new THREE.Vector3(bodyAt.x, bodyAt.y, bodyAt.z)) : null;
-          const diagnostic = {
-            physics: contactAndMotorDiagnostic(),
-            stage: script.stage + 1,
-            waypoint: plan.steps.indexOf(step) + 1,
-            simulatedSeconds: round4(script.clock + script.time),
-            waitSeconds: round4(script.wait),
-            joints: JOINTS.map((joint) => ({
-              name: joint.name,
-              unit: joint.unit,
-              target: round4(step.pose[joint.name]),
-              command: round4(currentValues[joint.name]),
-              actual: round4(measuredValues[joint.name]),
-              error: round4(measuredValues[joint.name] - step.pose[joint.name]),
-              servoTrimDeg: joint.unit === "deg" ? round4(measured(armJoints?.get(joint.urdfJoints[0])?.trim ?? 0)) : null,
-              angularVelocity: armJoints?.get(joint.urdfJoints[0])?.child.angvel(),
-            })),
-            targetTCP: expected?.position.toArray(),
-            actualTCP: actualTCP?.toArray(),
-            tcpErrorMm: expected && actualTCP ? round4(expected.position.distanceTo(actualTCP) * 1000) : null,
-            orientationErrorDeg: expected && actualRotation ? round4(measured(expected.rotation.angleTo(actualRotation))) : null,
-            gripped: gripped?.id ?? null,
-            fingerContacts: props.filter((prop) => fingerColliders.some((finger) => touching(prop.collider, finger))).map((prop) => prop.id),
-          };
-          console.warn("TRACKING_DIAGNOSTIC " + JSON.stringify(diagnostic));
-          throw new Error(`TRACKING ERROR - stage ${diagnostic.stage}, waypoint ${diagnostic.waypoint}, TCP error ${diagnostic.tcpErrorMm} mm; see TRACKING_DIAGNOSTIC`);
-        }
-        script.clock += GENERATION_DT;
-        return true;
-      }
-      script.wait = 0;
-    }
-    break;
-  }
-  script.time += GENERATION_DT;
-  if (script.time < plan.total) return true;
-
-  return false;
-}
-
-/**
- * Closed-loop inference against a trained checkpoint. The policy predicts a chunk of absolute
- * joint targets; only the first few are executed before re-observing, so tracking error and
- * physics disturbances are corrected instead of accumulating across the whole chunk.
- */
-const POLICY_STEPS_PER_CHUNK = 8;
-
-async function postPolicy(route: string, payload: unknown) {
-  const response = await fetch(`/__policy/${route}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload ?? {}),
-  });
-  const result = await response.json().catch(() => ({ error: `${route} returned no JSON` }));
-  if (!response.ok) throw new Error(result.error ?? `${route} failed`);
-  return result;
-}
-
-function setPolicyState(message: string, kind: "idle" | "running" | "error" = "idle") {
-  policyStateElement.textContent = message;
-  policyStateElement.classList.toggle("is-running", kind === "running");
-  policyStateElement.classList.toggle("is-error", kind === "error");
-}
-
-async function refreshPolicyModels() {
-  try {
-    const { models } = await postPolicy("list", {});
-    policyModelElement.replaceChildren();
-    if (!models.length) {
-      policyModelElement.append(new Option("No checkpoints found", ""));
-      policyButton.disabled = true;
-      setPolicyState("No checkpoints in checkpoints/. Train one with training.train first.");
-      return;
-    }
-    for (const model of models) {
-      const megabytes = (model.bytes / 1e6).toFixed(1);
-      policyModelElement.append(new Option(`${model.name} — ${megabytes} MB`, model.name));
-    }
-    policyButton.disabled = false;
-    setPolicyState(`${models.length} checkpoint${models.length === 1 ? "" : "s"} available.`);
-  } catch (error) {
-    policyButton.disabled = true;
-    setPolicyState(`Could not list checkpoints: ${error}`, "error");
-  }
-}
-
-function setPolicyControls(running: boolean) {
-  policyButton.disabled = running;
-  policyStopButton.disabled = !running;
-  policyModelElement.disabled = running;
-  recordButton.disabled = running;
-  generateButton.disabled = running;
-  newTaskButton.disabled = running;
-  resetButton.disabled = running;
-  policyButton.textContent = running ? "Running…" : "Run policy";
-}
-
-async function requestPolicyChunk() {
-  const active = policy;
-  if (!active || active.requesting) return;
-  active.requesting = true;
-  try {
-    const { actions } = await postPolicy("act", {
-      images: {
-        top: renderObservation(sensorCameras.get("overhead")!),
-        gripper: renderObservation(sensorCameras.get("wrist")!),
-      },
-      state: JOINTS.map((joint) => measuredValues[joint.name]),
-      task: instructionElement.value,
-    });
-    // A stop between the request and its reply must not resurrect the policy.
-    if (policy !== active) return;
-    active.queue = actions.slice(0, POLICY_STEPS_PER_CHUNK);
-    active.chunks += 1;
-  } catch (error) {
-    if (policy === active) stopPolicy(`Policy failed: ${error}`, "error");
-  } finally {
-    active.requesting = false;
-  }
-}
-
-/** Drives `targetValues` from the policy at the capture rate; the motors handle the rest. */
-function updatePolicy(now: number) {
-  const active = policy!;
-  if (now - active.lastStep < SAMPLE_INTERVAL) return;
-  active.lastStep = now;
-  const action = active.queue.shift();
-  if (!action) {
-    void requestPolicyChunk();
+function moveGripperToPick() {
+  const target = pickedPoint();
+  if (!target) return;
+  if (!spec.solve || !constrainedIK) {
+    setPickState("This robot has no IK solver.", "error");
     return;
   }
-  JOINTS.forEach((joint, index) => {
-    targetValues[joint.name] = THREE.MathUtils.clamp(action[index] ?? joint.initial, joint.min, joint.max);
-  });
-  updateJointUI(targetValues);
-  active.steps += 1;
-  setPolicyState(`${active.model} — ${active.chunks} chunks, ${active.steps} steps`, "running");
-  // Fetch the next chunk one step early so the arm is not left waiting on the round trip.
-  if (active.queue.length <= 1) void requestPolicyChunk();
-}
-
-async function startPolicy() {
-  const model = policyModelElement.value;
-  if (!model) return;
-  setPolicyControls(true);
-  setPolicyState(`Loading ${model}…`);
-  try {
-    const ready = await postPolicy("load", { model });
-    policy = { model, queue: [], requesting: false, lastStep: 0, steps: 0, chunks: 0 };
-    setPolicyState(`${model} loaded on ${ready.device ?? "cpu"} — running`, "running");
-    statusElement.textContent = `POLICY RUNNING — ${model}`;
-  } catch (error) {
-    setPolicyControls(false);
-    setPolicyState(`Could not load ${model}: ${error}`, "error");
+  for (const degrees of [90, 75, 60, 45, 30]) {
+    const solution = spec.solve(spec.mount, target, THREE.MathUtils.degToRad(degrees), 0, currentValues);
+    if (!solution) continue;
+    for (const joint of JOINTS) {
+      // The jaw opening belongs to the operator; IK only places the wrist.
+      if (joint.name === "gripper") continue;
+      const value = solution[joint.name];
+      if (value !== undefined) {
+        targetValues[joint.name] = THREE.MathUtils.clamp(value, joint.min, joint.max);
+      }
+    }
+    const residual = constrainedIK.forwardPose(solution).position.distanceTo(target) * 1000;
+    setPickState(`Moving: ${degrees}° approach, ${residual.toFixed(1)} mm residual.`, "ok");
+    statusElement.textContent =
+      `GRIPPER TO ${target.x.toFixed(3)}, ${target.y.toFixed(3)}, ${target.z.toFixed(3)}`;
+    return;
   }
+  setPickState("Out of reach: no approach angle solves for that point.", "error");
 }
 
-function stopPolicy(message = "Policy stopped.", kind: "idle" | "error" = "idle") {
-  const finished = policy;
-  policy = null;
-  setPolicyControls(false);
-  setPolicyState(finished ? `${message} ${finished.steps} steps over ${finished.chunks} chunks.` : message, kind);
-  statusElement.textContent = "POLICY STOPPED";
-  void postPolicy("stop", {}).catch(() => {});
+sideCanvas.addEventListener("click", (event) => {
+  // This view looks along -Z, so its ray is horizontal and only the height it crosses is new.
+  pickHeight = unprojectClick(event, sideCanvas, sideCamera).y;
+  updatePickUI();
+  setPickState(pickGround
+    ? "Point set. Move the gripper to it."
+    : "Height set. Now click the floor position in the top view.");
+});
+
+topCanvas.addEventListener("click", (event) => {
+  // This view looks straight down, so its ray is vertical and fixes the floor position.
+  const at = unprojectClick(event, topCanvas, topCamera);
+  pickGround = { x: at.x, z: at.z };
+  updatePickUI();
+  setPickState(pickHeight === null
+    ? "Floor position set. Now click the height in the side view."
+    : "Point set. Move the gripper to it.");
+});
+
+pickMoveButton.addEventListener("click", moveGripperToPick);
+pickClearButton.addEventListener("click", clearPick);
+
+/** Marks where the point sits in a view, so the two clicks can be checked against each other. */
+function drawCross(canvas: HTMLCanvasElement, view: THREE.Camera, point: THREE.Vector3) {
+  const at = point.clone().project(view);
+  if (at.z < -1 || at.z > 1) return;
+  const x = (at.x + 1) / 2 * canvas.width;
+  const y = (1 - at.y) / 2 * canvas.height;
+  const context = canvas.getContext("2d")!;
+  context.save();
+  context.strokeStyle = "#ec542f";
+  context.lineWidth = 2;
+  context.beginPath();
+  context.moveTo(x - 10, y); context.lineTo(x + 10, y);
+  context.moveTo(x, y - 10); context.lineTo(x, y + 10);
+  context.stroke();
+  context.beginPath();
+  context.arc(x, y, 6, 0, Math.PI * 2);
+  context.stroke();
+  context.restore();
 }
 
-function setGenerationControls(running: boolean) {
-  recordButton.disabled = running;
-  newTaskButton.disabled = running;
-  resetButton.disabled = running;
-  generateButton.disabled = running;
-  generateButton.textContent = running ? "Generating…" : "Generate";
-}
-
-function skipGeneratedEpisode(reason: string) {
-  const summary = generation!;
-  const category = reason.split(" - ", 1)[0];
-  summary.failed += 1;
-  summary.failureReasons[category] = (summary.failureReasons[category] ?? 0) + 1;
-  script = null;
-  frames = [];
-  clearMotorTrims();
-  if (summary.attempted >= summary.maxAttempts) {
-    finishGeneration(
-      `MAX ATTEMPTS REACHED - ${summary.succeeded}/${summary.requested} successful; last failure: ${reason}`,
+/** Redrawn with the sensor previews; these views are for aiming, not for frame rate. */
+function renderPickViews(now: number) {
+  if (now - lastPickRender < 100) return;
+  lastPickRender = now;
+  const point = pickedPoint();
+  for (const pair of [[sideCanvas, sideCamera], [topCanvas, topCamera]] as const) {
+    renderObservationView(pair[1]);
+    pair[0].getContext("2d")!.drawImage(observationRenderer.domElement, 0, 0, pair[0].width, pair[0].height);
+    if (point) drawCross(pair[0], pair[1], point);
+  }
+  // Context only: the centre camera says which cube is which, the grey views do not.
+  const centre = sensorCameras.get("overhead");
+  if (centre) {
+    contextCanvas.getContext("2d")!.drawImage(
+      sensorCanvases.get("overhead")!, 0, 0, contextCanvas.width, contextCanvas.height,
     );
-    return;
-  }
-  statusElement.textContent =
-    `SKIPPED ATTEMPT ${summary.attempted}/${summary.maxAttempts} — ${reason} — ` +
-    `${summary.succeeded}/${summary.requested} SUCCESSFUL`;
-}
-
-function finishGeneration(problem?: string) {
-  const summary = generation!;
-  generation = null;
-  script = null;
-  setGenerationControls(false);
-  datasetButton.disabled = dataset.length === 0;
-  replayButton.disabled = frames.length === 0;
-  downloadButton.disabled = frames.length === 0;
-  const done = `${summary.succeeded}/${summary.requested} SUCCESSFUL — ` +
-    `${summary.failed} SKIPPED IN ${summary.attempted} ATTEMPTS`;
-  const target = writer ? ` INTO ${writer.root.name}/` : "";
-  const report = problem ? `STOPPED AFTER ${done} — ${problem}` : `GENERATED ${done}${target}`;
-
-  if (writer) {
-    const finished = writer;
-    writeDatasetMeta(summary)
-      .then(async () => {
-        if (summary.succeeded > 0 && "localRun" in finished && finished.convertToLerobot) {
-          statusElement.textContent = `${report} — CONVERTING SUCCESSFUL EPISODES TO LEROBOT V3`;
-          try {
-            const result = await postDataset("convert", { run: finished.localRun });
-            statusElement.textContent = `${report} — LEROBOT V3 READY AT ${result.name}/`;
-          } catch (error) {
-            statusElement.textContent =
-              `${report} — RAW DATA READY AT ${finished.root.name}/ — LEROBOT V3 NOT CREATED: ${error}`;
-          }
-          return;
-        }
-        statusElement.textContent = summary.completed > 0
-          ? `${report} — RAW DATA READY AT ${finished.root.name}/`
-          : `${report} — NO COMPLETED EPISODES SAVED`;
-      })
-      .catch((error) => {
-        statusElement.textContent = `${report} — FINALIZATION FAILED: ${error}`;
-      });
-  }
-  statusElement.textContent = report;
-}
-
-async function startGeneration() {
-  if (!spec.solve) {
-    statusElement.textContent = `NO IK FOR ${spec.label} — SCRIPTED GENERATION UNAVAILABLE`;
-    return;
-  }
-  const requested = Math.max(1, Math.min(2000, Number(episodeCountElement.value) || 1));
-  episodeCountElement.value = String(requested);
-
-  writer = null;
-  const outputMode = document.querySelector<HTMLSelectElement>("#generation-output")!.value;
-  if (outputMode === "local" || outputMode === "lerobot") {
-    try {
-      const result = await postDataset("start", {});
-      writer = {
-        root: { name: result.name },
-        localRun: result.run,
-        convertToLerobot: outputMode === "lerobot",
-      };
-    } catch (error) {
-      statusElement.textContent = `CANNOT WRITE PROJECT data/ - USE THE LOCAL VITE SERVER: ${error}`;
-      return;
-    }
-  } else if (canWriteToDisk() && outputMode === "folder") {
-    try {
-      // Must be called straight off the click: the picker needs the user gesture.
-      const root = await window.showDirectoryPicker({ mode: "readwrite" });
-      writer = { root, episodes: await root.getDirectoryHandle("episodes", { create: true }) };
-    } catch {
-      statusElement.textContent = "NO FOLDER CHOSEN — GENERATION CANCELLED";
-      return;
-    }
-  }
-
-  dataset = [];
-  generation = {
-    requested,
-    completed: 0,
-    succeeded: 0,
-    attempted: 0,
-    failed: 0,
-    maxAttempts: requested * 10,
-    failureReasons: {},
-    flushing: false,
-  };
-  setGenerationControls(true);
-  datasetButton.disabled = true;
-  statusElement.textContent = writer
-    ? `GENERATING 0/${requested} — WRITING TO ${writer.root.name}/`
-    : `GENERATING 0/${requested} - IN MEMORY / DOWNLOAD JSON WHEN COMPLETE`;
-}
-
-function runGeneration() {
-  const deadline = performance.now() + GENERATION_BUDGET_MS;
-  while (generation && !generation.flushing && performance.now() < deadline) {
-    if (!script) {
-      if (generation.succeeded >= generation.requested) {
-        finishGeneration();
-        return;
-      }
-      if (!startGeneratedEpisode()) {
-        finishGeneration("COULD NOT SAMPLE A REACHABLE PICK-AND-PLACE LAYOUT");
-        return;
-      }
-      generation.attempted += 1;
-    }
-    if (performance.now() - script!.startedAt >= EPISODE_TIMEOUT_MS) {
-      skipGeneratedEpisode("EPISODE TIMEOUT - the current episode did not finish within 60 seconds");
-      return;
-    }
-    let advancing: boolean;
-    try {
-      advancing = advanceScript();
-    } catch (error) {
-      Object.assign(currentValues, measuredValues);
-      Object.assign(targetValues, measuredValues);
-      clearMotorTrims();
-      commandArm(currentValues);
-      skipGeneratedEpisode(error instanceof Error ? error.message : String(error));
-      return;
-    }
-    if (!advancing) {
-      const episode = buildEpisode();
-      if (!episode.success) {
-        skipGeneratedEpisode("TASK FAILED - trajectory finished outside the success condition");
-        return;
-      }
-      const index = generation.completed;
-      generation.completed += 1;
-      generation.succeeded += 1;
-      script = null;
-      statusElement.textContent =
-        `GENERATING ${generation.completed}/${generation.requested} — ${generation.succeeded} SUCCEEDED`;
-
-      if (writer) {
-        // Hand it to disk and stop ticking until it lands, so memory stays flat.
-        const pending = generation;
-        pending.flushing = true;
-        statusElement.textContent =
-          `SAVING EPISODE ${generation.completed}/${generation.requested} — ${frames.length} FRAMES`;
-        writeEpisode(episode, index)
-          .then(() => {
-            pending.flushing = false;
-          })
-          .catch((error) => {
-            pending.flushing = false;
-            finishGeneration(`WRITE FAILED: ${error}`);
-          });
-      } else {
-        dataset.push(episode);
-      }
-    }
+    if (point) drawCross(contextCanvas, centre, point);
   }
 }
 
@@ -2528,67 +1687,42 @@ function animate(now: number) {
   const deltaSeconds = Math.min((now - previousTime) / 1000, 0.1);
   previousTime = now;
 
-  if (generation) {
-    runGeneration();
-    updateJointUI(currentValues);
-  } else {
-    if (replaying) {
-      updateReplay(now);
-    } else {
-      // A running policy writes the same targets the sliders would; everything downstream of
-      // `targetValues` is identical, so inference and manual control share one path.
-      if (policy) updatePolicy(now);
-      // Sliders command the motors directly. The lag between command and pose used to be a
-      // hand-rolled exponential blend; it now comes from the arm's own inertia.
-      const blend = armJoints ? 1 : 1 - Math.exp(-9 * deltaSeconds);
-      for (const joint of JOINTS) {
-        currentValues[joint.name] = THREE.MathUtils.lerp(
-          currentValues[joint.name],
-          targetValues[joint.name],
-          blend,
-        );
-      }
-    }
-    setRobotPose(currentValues);
-    stepPhysics(deltaSeconds);
-    syncArmFromPhysics();
-    updateGrasp();
+  // Sliders and the view picker both command the motors through `targetValues`. The lag
+  // between command and pose used to be a hand-rolled exponential blend; it now comes from
+  // the arm's own inertia.
+  const blend = armJoints ? 1 : 1 - Math.exp(-9 * deltaSeconds);
+  for (const joint of JOINTS) {
+    currentValues[joint.name] = THREE.MathUtils.lerp(
+      currentValues[joint.name],
+      targetValues[joint.name],
+      blend,
+    );
   }
-  updateTaskState();
+  setRobotPose(currentValues);
+  stepPhysics(deltaSeconds);
+  syncArmFromPhysics();
+  updateGrasp();
   orbitControls.update();
   // Mounted cameras need their parent link transforms updated before rendering.
   scene.updateMatrixWorld(true);
   renderSensorPreviews(now);
+  renderPickViews(now);
   updateColliderDebug();
   const viewCamera = activeView === "orbit" ? camera : sensorCameras.get(activeView)!;
   viewCamera.aspect = camera.aspect;
   viewCamera.updateProjectionMatrix();
   renderer.render(scene, viewCamera);
-
-  if (recording && now - lastSample >= SAMPLE_INTERVAL) {
-    captureFrame((now - recordStart) / 1000);
-    lastSample = now;
-  }
 }
 
 setupSensorCameras();
-buildJointControls();
 resizeRenderer();
 useBackdrop(0);
 newEpisode();
 stepPhysics(PHYSICS_STEP);
-previewElement.src = renderObservation(sensorCameras.get("overhead")!);
 renderer.setAnimationLoop(animate);
 
-recordButton.addEventListener("click", startRecording);
-stopButton.addEventListener("click", stopRecording);
-replayButton.addEventListener("click", replayEpisode);
-downloadButton.addEventListener("click", downloadEpisode);
 resetButton.addEventListener("click", resetPose);
-newTaskButton.addEventListener("click", newEpisode);
-generateButton.addEventListener("click", startGeneration);
-datasetButton.addEventListener("click", downloadDataset);
-policyButton.addEventListener("click", () => void startPolicy());
-policyStopButton.addEventListener("click", () => stopPolicy());
+newSceneButton.addEventListener("click", () => { newEpisode(); clearPick(); });
+jawOpenButton.addEventListener("click", () => setJaws(true));
+jawCloseButton.addEventListener("click", () => setJaws(false));
 window.addEventListener("resize", resizeRenderer);
-void refreshPolicyModels();
