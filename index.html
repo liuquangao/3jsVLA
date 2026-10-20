@@ -21,30 +21,6 @@
       </header>
 
       <section class="workspace">
-        <div class="stage-panel">
-          <div id="scene" class="scene" aria-label="Three.js robot scene"></div>
-          <div class="stage-label">
-            <button class="camera-orbit" type="button" data-camera="orbit" aria-pressed="true">ORBIT</button>
-            <button id="collision-debug-toggle" class="camera-orbit" type="button" aria-pressed="false" title="Show actual Rapier finger collision hulls in the orbit view">GRIPPER HULL</button>
-            <span id="camera-view-label">DRAG TO ORBIT / SCROLL TO ZOOM</span>
-          </div>
-          <div class="axis-mark" aria-hidden="true">
-            <span class="axis-y">Y</span>
-            <span class="axis-x">X</span>
-            <span class="axis-z">Z</span>
-          </div>
-          <nav class="camera-dock" aria-label="Live camera views">
-            <button class="camera-tile" type="button" data-camera="wrist" aria-pressed="false">
-              <canvas id="camera-wrist" aria-label="Live gripper camera"></canvas>
-              <span>01 / GRIPPER <small>LIVE</small></span>
-            </button>
-            <button class="camera-tile" type="button" data-camera="overhead" aria-pressed="false">
-              <canvas id="camera-overhead" aria-label="Live central forward-facing camera"></canvas>
-              <span>02 / CENTER <small>LIVE</small></span>
-            </button>
-          </nav>
-        </div>
-
         <section class="pick-stage">
           <div class="section-heading">
             <span>01</span>

@@ -26,6 +26,7 @@ http://127.0.0.1:5173/?robot=so101
 
 ## Features
 
+- Three orthographic and perspective views, with no un-measurable scene view competing for room
 - Three.js scene with the official A1Z/G1Z URDF and mesh assets
 - Rapier rigid-body physics for the arm, gripper, cubes, and desk
 - Constrained numerical IK with collision-aware vertical approaches
@@ -40,6 +41,12 @@ The interface is built to be read and operated from pixels alone, by a person or
 driving the mouse: everything needed for a decision is on screen at once, and every action is a
 click. Two orthographic views carry the geometry, one from above and one from the side. Click a
 point in each and the gripper midpoint is sent where the two rays cross.
+
+There is deliberately no perspective view of the whole scene. Nothing can be measured from one —
+the same pixel offset is millimetres near the camera and centimetres far from it — so it would
+occupy the screen without answering any question the operator can act on. Dropping it leaves the
+two measurable views half again as large, which is what a click's precision is made of, and the
+page down to a single WebGL context.
 
 ```text
 top view   ->  X and Z      (the ray is vertical)

@@ -1,6 +1,5 @@
 import RAPIER from "@dimforge/rapier3d-compat";
 import * as THREE from "three";
-import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
 import URDFLoader, { type URDFLink, type URDFRobot } from "urdf-loader";
@@ -37,13 +36,6 @@ type RobotSpec = {
   mount: Vec3;
   /** World Y rotation applied to the robot and its reachable workspace. */
   heading?: number;
-  view: {
-    camera: Vec3;
-    target: Vec3;
-    distance: [number, number];
-    obsCamera: Vec3;
-    obsTarget: Vec3;
-  };
   /** Keyed by URDF link name. Links absent here keep the colour the URDF declares. */
   finish: Record<string, LinkFinish>;
   /** How the gripper closes on an object. */
@@ -165,15 +157,6 @@ const A1Z: RobotSpec = {
   // Base extends 37.5 mm towards the edge; leave its outer face 3 mm inside the desktop.
   mount: [0.20, 0.001, -0.4331],
   heading: -Math.PI / 2,
-  // Framed low enough that the backdrop reads as a room rather than just its floor, while the
-  // observation still fills with the reachable patch of desk.
-  view: {
-    camera: [1.15, 1.15, 1.55],
-    target: [0.10, 0.12, 0],
-    distance: [0.9, 5],
-    obsCamera: [0.95, 0.72, 0.85],
-    obsTarget: [0.10, 0.05, -0.05],
-  },
   // The vendor URDF paints all nine links the same SolidWorks default grey, so the arm
   // arrives colourless. These are read off Galaxea's own product render: black anodised
   // base and wrist, charcoal shoulder and upper arm, brushed-aluminium forearm.
@@ -246,13 +229,6 @@ const SO101: RobotSpec = {
   urdf: "/assets/robots/so101/so101_new_calib.urdf",
   packages: {},
   mount: [-0.22, 0.001, 0],
-  view: {
-    camera: [0.82, 0.58, 0.84],
-    target: [0, 0.18, 0],
-    distance: [0.7, 3],
-    obsCamera: [0.68, 0.5, 0.68],
-    obsTarget: [0, 0.16, 0],
-  },
   finish: {}, // the SO-101 URDF already declares per-link colours
   // The SO-101 jaw swings on a hinge, so its opening is not linear in the control and the closed
   // position is measured rather than derived.
@@ -290,7 +266,6 @@ const JOINTS = spec.joints;
  * force, which is what holds the cube up. Command exactly the cube's width instead and the grip
  * is zero.
  */
-const GRIPPER_SQUEEZE = 0.01;
 const DESK = { top: 0.7875, width: 2.0, depth: 0.9472 };
 
 /** Swapped per episode so the policy cannot use the backdrop as a position cue. */
@@ -345,13 +320,13 @@ type Task = {
   instruction: string;
 };
 
-const sceneElement = document.querySelector<HTMLDivElement>("#scene")!;
 const resetButton = document.querySelector<HTMLButtonElement>("#reset-button")!;
 const newSceneButton = document.querySelector<HTMLButtonElement>("#new-scene-button")!;
 const jawOpenButton = document.querySelector<HTMLButtonElement>("#jaw-open-button")!;
 const jawCloseButton = document.querySelector<HTMLButtonElement>("#jaw-close-button")!;
 const statusElement = document.querySelector<HTMLElement>("#status-message")!;
 const robotBadgeElement = document.querySelector<HTMLElement>("#robot-badge")!;
+robotBadgeElement.textContent = `${spec.label} / SIM`;
 
 const initialValues = Object.fromEntries(JOINTS.map((joint) => [joint.name, joint.initial])) as JointValues;
 /** What the arm is told to do. With dynamics on, what it actually does is `measuredValues`. */
@@ -366,30 +341,6 @@ let task: Task = {
 };
 
 const scene = new THREE.Scene();
-
-const camera = new THREE.PerspectiveCamera(38, 1, 0.01, 20);
-camera.position.set(...spec.view.camera);
-camera.lookAt(...spec.view.target);
-
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFShadowMap;
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.05;
-sceneElement.appendChild(renderer.domElement);
-
-const orbitControls = new OrbitControls(camera, renderer.domElement);
-orbitControls.target.set(...spec.view.target);
-orbitControls.enableDamping = true;
-orbitControls.minDistance = spec.view.distance[0];
-orbitControls.maxDistance = spec.view.distance[1];
-orbitControls.maxPolarAngle = Math.PI * 0.49;
-
-const observationCamera = new THREE.PerspectiveCamera(46, OBSERVATION_WIDTH / OBSERVATION_HEIGHT, 0.01, 10);
-observationCamera.position.set(...spec.view.obsCamera);
-observationCamera.lookAt(...spec.view.obsTarget);
 
 const observationRenderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
 observationRenderer.setSize(OBSERVATION_WIDTH, OBSERVATION_HEIGHT, false);
@@ -448,13 +399,8 @@ scene.add(floor);
  * source. Loading all of them up front costs a slower start but keeps `newEpisode` synchronous,
  * which matters because generation runs on a fixed simulated clock and cannot await anything.
  */
-const pmrem = new THREE.PMREMGenerator(renderer);
-pmrem.compileEquirectangularShader();
-// Render-target textures belong to their WebGL context. The preview renderer needs its own
-// prefiltered environment; sharing the main renderer's GPU texture loses indirect lighting.
 const observationPmrem = new THREE.PMREMGenerator(observationRenderer);
 observationPmrem.compileEquirectangularShader();
-let observationEnvironment: THREE.Texture | null = null;
 const rgbeLoader = new RGBELoader();
 
 const backdrops = await Promise.all(
@@ -463,8 +409,7 @@ const backdrops = await Promise.all(
     texture.mapping = THREE.EquirectangularReflectionMapping;
     return {
       background: texture,
-      environment: pmrem.fromEquirectangular(texture).texture,
-      observationEnvironment: observationPmrem.fromEquirectangular(texture).texture,
+      environment: observationPmrem.fromEquirectangular(texture).texture,
     };
   }),
 );
@@ -473,20 +418,11 @@ function useBackdrop(index: number) {
   const backdrop = backdrops[index];
   scene.background = backdrop.background;
   scene.environment = backdrop.environment;
-  observationEnvironment = backdrop.observationEnvironment;
 }
 
+/** Every picture in the interface is drawn here, so they are all lit identically. */
 function renderObservationView(view: THREE.Camera) {
-  const mainEnvironment = scene.environment;
-  const debugVisible = colliderDebug.visible;
-  try {
-    colliderDebug.visible = false;
-    scene.environment = observationEnvironment;
-    observationRenderer.render(scene, view);
-  } finally {
-    scene.environment = mainEnvironment;
-    colliderDebug.visible = debugVisible;
-  }
+  observationRenderer.render(scene, view);
 }
 
 // The arm and props share a dynamic world. Grasping uses jaw contact friction.
@@ -952,41 +888,6 @@ function buildArmDynamics() {
 const IDENTITY = new THREE.Quaternion();
 const armJoints = buildArmDynamics();
 
-// Draw the solver's actual collision geometry, not another approximation of the STL.
-const colliderDebug = new THREE.LineSegments(
-  new THREE.BufferGeometry(),
-  new THREE.LineBasicMaterial({ color: 0xff9b22, depthTest: false, depthWrite: false, toneMapped: false }),
-);
-colliderDebug.name = "gripper-collision-debug";
-colliderDebug.frustumCulled = false;
-colliderDebug.renderOrder = 1000;
-colliderDebug.visible = false;
-scene.add(colliderDebug);
-let showColliderDebug = false;
-const collisionDebugButton = document.querySelector<HTMLButtonElement>("#collision-debug-toggle")!;
-collisionDebugButton.addEventListener("click", () => {
-  showColliderDebug = !showColliderDebug;
-  collisionDebugButton.setAttribute("aria-pressed", String(showColliderDebug));
-  collisionDebugButton.textContent = showColliderDebug ? "GRIPPER HULL ON" : "GRIPPER HULL";
-});
-
-function updateColliderDebug() {
-  colliderDebug.visible = showColliderDebug && activeView === "orbit";
-  if (!colliderDebug.visible) return;
-  const handles = new Set(fingerColliders.map((collider) => collider.handle));
-  const { vertices } = physics.debugRender(undefined, (collider) => handles.has(collider.handle));
-  const attribute = colliderDebug.geometry.getAttribute("position");
-  if (!attribute || attribute.array.length !== vertices.length) {
-    colliderDebug.geometry.dispose();
-    colliderDebug.geometry = new THREE.BufferGeometry();
-    colliderDebug.geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(vertices), 3));
-  } else {
-    attribute.array.set(vertices);
-    attribute.needsUpdate = true;
-  }
-}
-
-// Capture zero-pose joint origins before recording or commanding any joint angles.
 const constrainedIK = spec.id === "a1z" ? new ConstrainedIK(
   robot.matrixWorld.clone(),
   JOINTS.filter((control) => control.unit === "deg").map((control) => {
@@ -1192,13 +1093,7 @@ function setRobotPose(values: JointValues) {
 }
 
 type SensorView = "wrist" | "overhead";
-let activeView: SensorView | "orbit" = "orbit";
 const sensorCameras = new Map<SensorView, THREE.PerspectiveCamera>();
-const sensorCanvases = new Map<SensorView, HTMLCanvasElement>();
-const cameraButtons = document.querySelectorAll<HTMLButtonElement>("[data-camera]");
-let lastSensorPreview = -Infinity;
-
-/** Visual mounts are added after building physics, so they do not alter link hulls/inertia. */
 function setupSensorCameras() {
   const create = (id: SensorView, parent: THREE.Object3D, position: Vec3, target: Vec3, fov: number) => {
     const sensor = new THREE.PerspectiveCamera(fov, 4 / 3, 0.005, 20);
@@ -1210,11 +1105,6 @@ function setupSensorCameras() {
     sensor.lookAt(new THREE.Vector3(...target));
     parent.add(sensor);
     sensorCameras.set(id, sensor);
-    const canvas = document.querySelector<HTMLCanvasElement>(`#camera-${id}`)!;
-    canvas.width = OBSERVATION_WIDTH;
-    canvas.height = OBSERVATION_HEIGHT;
-    sensorCanvases.set(id, canvas);
-
     const housing = new THREE.Group();
     housing.position.copy(sensor.position);
     housing.quaternion.copy(sensor.quaternion);
@@ -1278,30 +1168,6 @@ function setupSensorCameras() {
     spec.heading ? [-0.10, spec.mount[1] + 0.50, spec.mount[2] + 0.035] : [headCameraX, spec.mount[1] + 0.50, 0],
     spec.heading ? [0, 0.045, spec.mount[2] + 0.48] : [spec.mount[0] + 0.48, 0.045, 0], 72);
 
-  for (const button of cameraButtons) {
-    button.addEventListener("click", () => {
-      activeView = button.dataset.camera as typeof activeView;
-      orbitControls.enabled = activeView === "orbit";
-      sceneElement.style.cursor = activeView === "orbit" ? "grab" : "default";
-      for (const item of cameraButtons) item.setAttribute("aria-pressed", String(item.dataset.camera === activeView));
-      document.querySelector("#camera-view-label")!.textContent = activeView === "orbit"
-        ? "DRAG TO ORBIT / SCROLL TO ZOOM"
-        : `${activeView === "overhead" ? "CENTER" : "GRIPPER"} CAMERA / LIVE`;
-    });
-  }
-}
-
-/** Reuse the observation renderer for both live camera previews. */
-function renderSensorPreviews(now: number) {
-  if (now - lastSensorPreview < 100) return;
-  lastSensorPreview = now;
-  for (const [id, sensor] of sensorCameras) {
-    sensor.aspect = OBSERVATION_WIDTH / OBSERVATION_HEIGHT;
-    sensor.updateProjectionMatrix();
-    renderObservationView(sensor);
-    const canvas = sensorCanvases.get(id)!;
-    canvas.getContext("2d")!.drawImage(observationRenderer.domElement, 0, 0, canvas.width, canvas.height);
-  }
 }
 
 function rollTask(center: THREE.Vector2): Task {
@@ -1703,19 +1569,12 @@ function renderPickViews(now: number) {
   // Context only: the centre camera says which cube is which, the grey views do not.
   const centre = sensorCameras.get("overhead");
   if (centre) {
+    renderObservationView(centre);
     contextCanvas.getContext("2d")!.drawImage(
-      sensorCanvases.get("overhead")!, 0, 0, contextCanvas.width, contextCanvas.height,
+      observationRenderer.domElement, 0, 0, contextCanvas.width, contextCanvas.height,
     );
     if (point) drawCross(contextCanvas, centre, point);
   }
-}
-
-function resizeRenderer() {
-  const width = sceneElement.clientWidth;
-  const height = sceneElement.clientHeight;
-  renderer.setSize(width, height, false);
-  camera.aspect = width / height;
-  camera.updateProjectionMatrix();
 }
 
 let previousTime = performance.now();
@@ -1738,27 +1597,19 @@ function animate(now: number) {
   stepPhysics(deltaSeconds);
   syncArmFromPhysics();
   updateGrasp();
-  orbitControls.update();
   // Mounted cameras need their parent link transforms updated before rendering.
   scene.updateMatrixWorld(true);
-  renderSensorPreviews(now);
   renderPickViews(now);
-  updateColliderDebug();
-  const viewCamera = activeView === "orbit" ? camera : sensorCameras.get(activeView)!;
-  viewCamera.aspect = camera.aspect;
-  viewCamera.updateProjectionMatrix();
-  renderer.render(scene, viewCamera);
+  requestAnimationFrame(animate);
 }
 
 setupSensorCameras();
-resizeRenderer();
 useBackdrop(0);
 newEpisode();
 stepPhysics(PHYSICS_STEP);
-renderer.setAnimationLoop(animate);
+requestAnimationFrame(animate);
 
 resetButton.addEventListener("click", resetPose);
 newSceneButton.addEventListener("click", () => { newEpisode(); clearPick(); });
 jawOpenButton.addEventListener("click", () => setJaws(true));
 jawCloseButton.addEventListener("click", () => setJaws(false));
-window.addEventListener("resize", resizeRenderer);
