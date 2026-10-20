@@ -572,19 +572,18 @@ button:disabled {
 }
 
 .pick-images {
+  align-content: start;
   display: grid;
   flex: 1;
   gap: 12px;
   grid-template-columns: 1fr 1fr;
   min-height: 0;
+  overflow-y: auto;
 }
 
 .pick-image {
-  display: flex;
-  flex: 1 1 0;
-  flex-direction: column;
   margin: 0;
-  min-height: 0;
+  min-width: 0;
 }
 
 /*
@@ -593,17 +592,20 @@ button:disabled {
  * would aim the ray somewhere the operator did not click. Sizing by height and deriving the
  * width keeps the box and the picture the same shape, and leaves `object-fit` nothing to do.
  */
+/*
+ * The box must keep the camera's own aspect. A click becomes a ray from its position within
+ * this rectangle, and the picture is stretched to fill it, so a box of a different shape shows
+ * a distorted scene even though the ray still lands where the pointer did. Width leads and
+ * height follows: constraining both fights `aspect-ratio` and silently squares the box off.
+ */
 .pick-image canvas {
   aspect-ratio: 4 / 3;
   background: #11120f;
   border: 1px solid var(--ink);
   cursor: crosshair;
   display: block;
-  height: 100%;
-  margin: 0 auto;
-  max-width: 100%;
-  min-height: 0;
-  width: auto;
+  height: auto;
+  width: 100%;
 }
 
 /* The centre camera is reference, not a click target. */

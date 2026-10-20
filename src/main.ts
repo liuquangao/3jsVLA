@@ -1456,17 +1456,45 @@ function resetPose() {
  * scene. A second WebGLRenderer cannot be used here: the environment map is a PMREM texture
  * belonging to one WebGL context, and sampling it from another silently drops the lighting.
  */
-/** Framed on the reachable workspace, so a pixel is worth about a millimetre. */
-const PICK_REACH = spec.reach.max + 0.08;
-const PICK_EYE_HEIGHT = 0.18;
 const PICK_ASPECT = OBSERVATION_WIDTH / OBSERVATION_HEIGHT;
-// Wide enough that the reach circle fits across the shorter screen axis of either view.
-const PICK_HALF_WIDTH = PICK_REACH * PICK_ASPECT;
-const PICK_HALF_HEIGHT = PICK_REACH;
+/** Room around the workspace for the arm itself, and for picking just outside it. */
+const PICK_MARGIN = 0.07;
+/** Table to a little above the highest useful approach. */
+const PICK_FLOOR = -0.03;
+const PICK_CEILING = 0.40;
 
-function orthoView(aimedAt: THREE.Vector3, from: THREE.Vector3, up: THREE.Vector3) {
+/**
+ * The patch of table the arm can actually serve.
+ *
+ * Framing on the mount instead wastes most of both pictures: the reachable annulus is swept on
+ * one side of the base, so the base sits at a corner of the useful area rather than its middle.
+ * This walks the same annulus `samplePlacement` draws from, so the views follow whatever reach
+ * and heading a robot declares instead of hard-coded numbers.
+ */
+const PICK_AREA = (() => {
+  const { min, max, yaw } = spec.reach;
+  const heading = spec.heading ?? 0;
+  const box = new THREE.Box2();
+  for (let step = 0; step <= 12; step += 1) {
+    const angle = THREE.MathUtils.lerp(-yaw, 0, step / 12);
+    for (const radius of [min, max]) {
+      const offset = new THREE.Vector3(radius * Math.cos(angle), 0, -radius * Math.sin(angle))
+        .applyAxisAngle(new THREE.Vector3(0, 1, 0), heading);
+      box.expandByPoint(new THREE.Vector2(spec.mount[0] + offset.x, spec.mount[2] + offset.z));
+    }
+  }
+  box.expandByScalar(PICK_MARGIN);
+  return box;
+})();
+
+/** Smallest frame of the view's own aspect that holds `across` by `down`, centred on the area. */
+function orthoView(
+  aimedAt: THREE.Vector3, from: THREE.Vector3, up: THREE.Vector3, across: number, down: number,
+) {
+  const halfHeight = Math.max(down, across / PICK_ASPECT) / 2;
+  const halfWidth = halfHeight * PICK_ASPECT;
   const view = new THREE.OrthographicCamera(
-    -PICK_HALF_WIDTH, PICK_HALF_WIDTH, PICK_HALF_HEIGHT, -PICK_HALF_HEIGHT, 0.01, 12,
+    -halfWidth, halfWidth, halfHeight, -halfHeight, 0.01, 12,
   );
   view.position.copy(from);
   view.up.copy(up);
@@ -1475,11 +1503,17 @@ function orthoView(aimedAt: THREE.Vector3, from: THREE.Vector3, up: THREE.Vector
   return view;
 }
 
+const pickCentre = PICK_AREA.getCenter(new THREE.Vector2());
+const pickSize = PICK_AREA.getSize(new THREE.Vector2());
+const PICK_EYE_HEIGHT = (PICK_FLOOR + PICK_CEILING) / 2;
+
 /** Looks along -Z, so screen right is +X and screen up is +Y. */
 const sideCamera = orthoView(
-  new THREE.Vector3(spec.mount[0], PICK_EYE_HEIGHT, spec.mount[2]),
-  new THREE.Vector3(spec.mount[0], PICK_EYE_HEIGHT, spec.mount[2] + 3),
+  new THREE.Vector3(pickCentre.x, PICK_EYE_HEIGHT, pickCentre.y),
+  new THREE.Vector3(pickCentre.x, PICK_EYE_HEIGHT, pickCentre.y + 3),
   new THREE.Vector3(0, 1, 0),
+  pickSize.x,
+  PICK_CEILING - PICK_FLOOR,
 );
 /**
  * Looks straight down. The up vector is -Z, not +Z: a camera's right axis is `up x forward`, so
@@ -1488,9 +1522,11 @@ const sideCamera = orthoView(
  * which way the scene faces.
  */
 const topCamera = orthoView(
-  new THREE.Vector3(spec.mount[0], 0, spec.mount[2]),
-  new THREE.Vector3(spec.mount[0], 3, spec.mount[2]),
+  new THREE.Vector3(pickCentre.x, 0, pickCentre.y),
+  new THREE.Vector3(pickCentre.x, 3, pickCentre.y),
   new THREE.Vector3(0, 0, -1),
+  pickSize.x,
+  pickSize.y,
 );
 
 const sideCanvas = document.querySelector<HTMLCanvasElement>("#view-side")!;
