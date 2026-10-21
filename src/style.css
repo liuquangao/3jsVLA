@@ -485,20 +485,21 @@ button:disabled {
 .pick-readout dt {
   color: var(--muted);
   font-family: "DM Mono", monospace;
-  font-size: 9px;
-  letter-spacing: 0.08em;
+  font-size: 11px;
+  letter-spacing: 0.06em;
 }
 
 .pick-readout dd {
   font-family: "DM Mono", monospace;
-  font-size: 12px;
-  margin: 2px 0 0;
+  font-size: 17px;
+  font-weight: 600;
+  margin: 3px 0 0;
 }
 
 .pick-state {
   color: var(--muted);
   font-family: "DM Mono", monospace;
-  font-size: 9px;
+  font-size: 12px;
   letter-spacing: 0.05em;
   line-height: 1.6;
   margin: 10px 0 0;
@@ -578,7 +579,7 @@ button:disabled {
 .readout-label {
   color: var(--muted);
   font-family: "DM Mono", monospace;
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.08em;
   margin: 0 0 6px;
   text-transform: uppercase;
@@ -586,4 +587,26 @@ button:disabled {
 
 .pick-readout.is-now dd {
   color: #2f8fec;
+}
+
+.readout-note {
+  opacity: 0.6;
+  text-transform: none;
+}
+
+/* Grasp state is the thing most often checked, so it is the thing most easily read. */
+.pick-readout.is-status {
+  grid-template-columns: 1fr 1fr;
+}
+
+.pick-readout.is-status dd {
+  font-size: 19px;
+}
+
+.pick-image figcaption {
+  font-size: 11px;
+}
+
+.pick-state.is-error {
+  font-weight: 600;
 }

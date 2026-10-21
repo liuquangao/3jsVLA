@@ -1417,6 +1417,22 @@ const gripperReadout = {
   y: document.querySelector<HTMLElement>("#gripper-y")!,
   z: document.querySelector<HTMLElement>("#gripper-z")!,
 };
+const errorReadout = document.querySelector<HTMLElement>("#pick-error")!;
+const jawReadout = document.querySelector<HTMLElement>("#jaw-state")!;
+
+/**
+ * Where the jaws were last sent, kept so the distance still to go can be reported.
+ *
+ * The IK residual this used to show answers "did the solver converge", which it always did, and
+ * looks like it answers "will the jaws be where you asked", which it does not: the solver knows
+ * nothing about the table, so a point low enough for the fingers to bottom out is solved
+ * perfectly and then missed by centimetres. Only the measured pose can tell the difference.
+ */
+let commandedTarget: THREE.Vector3 | null = null;
+let commandedAt = 0;
+let outcomeReported = false;
+let settleTicks = 0;
+let lastSettlePose: JointValues | null = null;
 
 const pickMarker = new THREE.Group();
 const pickDot = new THREE.Mesh(
@@ -1492,6 +1508,57 @@ function setJaws(open: boolean) {
 }
 
 /**
+ * Reports the distance still to go, and whether the arm has stopped going anywhere.
+ *
+ * Without the settled test a shortfall is indistinguishable from a move still in progress, so
+ * the operator cannot tell "wait" from "that did not work" and corrects against a pose that was
+ * never going to be reached.
+ */
+function updateTracking(now: number) {
+  const jaw = JOINTS.find((joint) => joint.name === "gripper");
+  if (jaw) {
+    const percent = measuredValues[jaw.name];
+    const span = jaw.max - jaw.min;
+    const openness = span === 0 ? 0 : (percent - jaw.min) / span;
+    jawReadout.textContent = `${Math.round(percent)}% ${openness > 0.9 ? "open" : openness < 0.1 ? "shut" : ""}`.trim();
+  }
+
+  const gripper = gripperPoint();
+  if (!gripper || !commandedTarget) {
+    errorReadout.textContent = "—";
+    return;
+  }
+  const off = gripper.distanceTo(commandedTarget) * 1000;
+  errorReadout.textContent = `${off.toFixed(0)} mm`;
+
+  // Gravity compensation and contact never leave the arm perfectly still, so "stopped" has to
+  // mean "no longer making progress", and a deadline guarantees an answer even if it jitters on.
+  const drift = lastSettlePose === null ? Infinity : Math.max(
+    ...JOINTS.map((joint) => Math.abs(measuredValues[joint.name] - lastSettlePose![joint.name])),
+  );
+  lastSettlePose = { ...measuredValues };
+  settleTicks = drift > 0.2 ? 0 : settleTicks + 1;
+  if (outcomeReported || (settleTicks < 4 && now - commandedAt < 4000)) return;
+  outcomeReported = true;
+
+  // Gravity sag leaves a few millimetres even on a clean move. Calling that a failure teaches
+  // the operator to ignore the one message that matters when a move really does fall short.
+  if (off <= 10) {
+    setPickState(`Arrived, ${off.toFixed(0)} mm off.`, "ok");
+  } else {
+    // The jaws reach below the point this reports, so low targets stop on the table.
+    const vertical = gripper.y - commandedTarget.y;
+    const blocked = vertical > 5 / 1000 && off - vertical * 1000 < 20;
+    setPickState(
+      blocked
+        ? `Stopped ${off.toFixed(0)} mm short, ${(vertical * 1000).toFixed(0)} mm of it high: the jaws are on the table.`
+        : `Stopped ${off.toFixed(0)} mm short of the target.`,
+      "error",
+    );
+  }
+}
+
+/**
  * Sends the gripper midpoint to the picked point.
  *
  * A straight-down approach is tried first because that is how the jaws reach a table. Shallower
@@ -1516,8 +1583,12 @@ function moveGripperToPick() {
         targetValues[joint.name] = THREE.MathUtils.clamp(value, joint.min, joint.max);
       }
     }
-    const residual = constrainedIK.forwardPose(solution).position.distanceTo(target) * 1000;
-    setPickState(`Moving: ${degrees}° approach, ${residual.toFixed(1)} mm residual.`, "ok");
+    commandedTarget = target.clone();
+    commandedAt = performance.now();
+    outcomeReported = false;
+    settleTicks = 0;
+    lastSettlePose = null;
+    setPickState(`Moving on a ${degrees}° approach…`);
     statusElement.textContent =
       `GRIPPER TO ${target.x.toFixed(3)}, ${target.y.toFixed(3)}, ${target.z.toFixed(3)}`;
     return;
@@ -1550,6 +1621,12 @@ pickClearButton.addEventListener("click", clearPick);
 const PICK_ORANGE = "#ec542f";
 const PICK_BLUE = "#2f8fec";
 const PICK_TICK = 0.05;
+/*
+ * This interface is read from screenshots, often downscaled on the way. Type that is merely
+ * small on a monitor is gone entirely by the time it reaches whoever is deciding where to
+ * click, so the overlays are drawn far larger than a desktop reading distance would need.
+ */
+const PICK_LABEL_EVERY = 0.10;
 
 function toPixels(canvas: HTMLCanvasElement, view: THREE.Camera, point: THREE.Vector3) {
   const at = point.clone().project(view);
@@ -1578,8 +1655,11 @@ function drawCross(
   context.beginPath();
   context.arc(at.x, at.y, 6, 0, Math.PI * 2);
   context.stroke();
-  context.font = "600 13px monospace";
-  context.fillText(label, at.x + 14, at.y - 10);
+  context.font = "700 20px monospace";
+  context.lineWidth = 4;
+  context.strokeStyle = "rgba(255, 255, 255, 0.85)";
+  context.strokeText(label, at.x + 16, at.y - 12);
+  context.fillText(label, at.x + 16, at.y - 12);
   context.restore();
 }
 
@@ -1644,31 +1724,41 @@ function drawTicks(
 ) {
   const context = canvas.getContext("2d")!;
   context.save();
-  context.strokeStyle = "rgba(20, 20, 20, 0.55)";
-  context.fillStyle = "rgba(20, 20, 20, 0.85)";
-  context.lineWidth = 1;
-  context.font = "11px monospace";
+  const write = (text: string, x: number, y: number) => {
+    context.lineWidth = 4;
+    context.strokeStyle = "rgba(255, 255, 255, 0.9)";
+    context.strokeText(text, x, y);
+    context.fillText(text, x, y);
+    context.lineWidth = 2;
+    context.strokeStyle = "rgba(20, 20, 20, 0.6)";
+  };
+  context.fillStyle = "rgba(15, 15, 15, 0.95)";
+  context.font = "700 18px monospace";
+  context.lineWidth = 2;
+  context.strokeStyle = "rgba(20, 20, 20, 0.6)";
   for (let value = -1; value <= 1.0001; value += PICK_TICK) {
     const rounded = Math.round(value * 100) / 100;
+    const labelled = Math.abs(rounded / PICK_LABEL_EVERY - Math.round(rounded / PICK_LABEL_EVERY)) < 1e-6;
     const horizontal = toPixels(canvas, view, across(rounded));
-    if (horizontal.x > 24 && horizontal.x < canvas.width - 4) {
+    if (horizontal.x > 40 && horizontal.x < canvas.width - 40) {
       context.beginPath();
       context.moveTo(horizontal.x, canvas.height);
-      context.lineTo(horizontal.x, canvas.height - (rounded === 0 ? 14 : 8));
+      context.lineTo(horizontal.x, canvas.height - (labelled ? 18 : 9));
       context.stroke();
-      context.fillText(rounded.toFixed(2), horizontal.x + 3, canvas.height - 4);
+      if (labelled) write(rounded.toFixed(2), horizontal.x + 4, canvas.height - 22);
     }
     const vertical = toPixels(canvas, view, down(rounded));
-    if (vertical.y > 12 && vertical.y < canvas.height - 18) {
+    if (vertical.y > 36 && vertical.y < canvas.height - 46) {
       context.beginPath();
       context.moveTo(0, vertical.y);
-      context.lineTo(rounded === 0 ? 14 : 8, vertical.y);
+      context.lineTo(labelled ? 18 : 9, vertical.y);
       context.stroke();
-      context.fillText(rounded.toFixed(2), 3, vertical.y - 3);
+      if (labelled) write(rounded.toFixed(2), 22, vertical.y + 6);
     }
   }
-  context.fillText(acrossLabel, canvas.width - 18, canvas.height - 18);
-  context.fillText(downLabel, 4, 14);
+  context.font = "700 22px monospace";
+  write(`${acrossLabel} →`, canvas.width - 70, canvas.height - 22);
+  write(`↑ ${downLabel}`, 8, 28);
   context.restore();
 }
 
@@ -1678,6 +1768,7 @@ function renderPickViews(now: number) {
   lastPickRender = now;
   const target = pickedPoint();
   const gripper = gripperPoint();
+  updateTracking(now);
   if (gripper) {
     gripperReadout.x.textContent = `${gripper.x.toFixed(3)} m`;
     gripperReadout.y.textContent = `${gripper.y.toFixed(3)} m`;

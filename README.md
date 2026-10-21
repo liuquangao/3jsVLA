@@ -83,6 +83,15 @@ never fires at all. A page meant to be driven by whoever is looking at it, inclu
 reading screenshots of a window it never focuses, cannot use the clock that stops when nobody is
 watching.
 
+After a move the panel reports the measured distance from the jaws to the point asked for, and
+says when the arm has stopped moving. It deliberately does not report the IK residual, which this
+once showed: that number answers "did the solver converge", which it always did, while looking
+like it answers "will the jaws be where you asked", which it often was not. The solver knows
+nothing about the table, so a point low enough for the fingers to bottom out solves perfectly and
+is then missed by centimetres — and the old readout called that a 0.1 mm hit. Only the measured
+pose can tell the difference, and when the shortfall is mostly vertical the panel says outright
+that the jaws are resting on the table.
+
 A straight-down approach is tried first, because that is how the jaws reach a table. Shallower
 pitches down to 30° are fallbacks for points the wrist cannot stand over, and the angle that
 worked is reported along with the residual between the solved pose and the point you asked for. A
