@@ -1254,8 +1254,14 @@ function samplePlacement(taken: Placement[], clearance: number) {
  * so approaching fingers and carried objects do not collide with neighbouring props.
  */
 function sampleLayout() {
-  // Keep generous separation while allowing three cubes in the narrower visible half-workspace.
-  const clearance = spec.props.cube * 1.6;
+  /*
+   * Rejection sampling only terminates if what is being packed actually fits. The reachable
+   * sector is about 0.054 m^2; at 1.6 cube widths each of the three cubes and the target needs
+   * a disc of roughly 0.017 m^2, which asks for 0.068 m^2 and leaves success to luck. 1.2 is
+   * still well clear of what the jaws need: they must descend around one cube without touching
+   * a neighbour, which wants about 58 mm between centres, and this leaves 108 mm.
+   */
+  const clearance = spec.props.cube * 1.2;
   const taken: Placement[] = [];
   for (let index = 0; index < props.length; index += 1) {
     const placement = samplePlacement(taken, clearance);
@@ -1406,6 +1412,11 @@ const pickReadout = {
 const pickMoveButton = document.querySelector<HTMLButtonElement>("#pick-move-button")!;
 const pickClearButton = document.querySelector<HTMLButtonElement>("#pick-clear-button")!;
 const pickStateElement = document.querySelector<HTMLElement>("#pick-state")!;
+const gripperReadout = {
+  x: document.querySelector<HTMLElement>("#gripper-x")!,
+  y: document.querySelector<HTMLElement>("#gripper-y")!,
+  z: document.querySelector<HTMLElement>("#gripper-z")!,
+};
 
 const pickMarker = new THREE.Group();
 const pickDot = new THREE.Mesh(
@@ -1536,55 +1547,196 @@ topCanvas.addEventListener("click", (event) => {
 pickMoveButton.addEventListener("click", moveGripperToPick);
 pickClearButton.addEventListener("click", clearPick);
 
-/** Marks where the point sits in a view, so the two clicks can be checked against each other. */
-function drawCross(canvas: HTMLCanvasElement, view: THREE.Camera, point: THREE.Vector3) {
+const PICK_ORANGE = "#ec542f";
+const PICK_BLUE = "#2f8fec";
+const PICK_TICK = 0.05;
+
+function toPixels(canvas: HTMLCanvasElement, view: THREE.Camera, point: THREE.Vector3) {
   const at = point.clone().project(view);
-  if (at.z < -1 || at.z > 1) return;
-  const x = (at.x + 1) / 2 * canvas.width;
-  const y = (1 - at.y) / 2 * canvas.height;
+  return { x: (at.x + 1) / 2 * canvas.width, y: (1 - at.y) / 2 * canvas.height, depth: at.z };
+}
+
+/** Where the jaws actually are, as opposed to where they were last told to go. */
+function gripperPoint() {
+  return constrainedIK ? constrainedIK.forwardPose(measuredValues).position : null;
+}
+
+function drawCross(
+  canvas: HTMLCanvasElement, view: THREE.Camera, point: THREE.Vector3, colour: string, label: string,
+) {
+  const at = toPixels(canvas, view, point);
+  if (at.depth < -1 || at.depth > 1) return;
   const context = canvas.getContext("2d")!;
   context.save();
-  context.strokeStyle = "#ec542f";
+  context.strokeStyle = colour;
+  context.fillStyle = colour;
   context.lineWidth = 2;
   context.beginPath();
-  context.moveTo(x - 10, y); context.lineTo(x + 10, y);
-  context.moveTo(x, y - 10); context.lineTo(x, y + 10);
+  context.moveTo(at.x - 11, at.y); context.lineTo(at.x + 11, at.y);
+  context.moveTo(at.x, at.y - 11); context.lineTo(at.x, at.y + 11);
   context.stroke();
   context.beginPath();
-  context.arc(x, y, 6, 0, Math.PI * 2);
+  context.arc(at.x, at.y, 6, 0, Math.PI * 2);
+  context.stroke();
+  context.font = "600 13px monospace";
+  context.fillText(label, at.x + 14, at.y - 10);
+  context.restore();
+}
+
+/**
+ * The patch of table the arm can serve, drawn where it is actually picked.
+ *
+ * Without it a point outside the workspace costs a whole look-decide-click round trip to find
+ * out, and the only feedback is a refusal after the fact. The annulus is the same one
+ * `samplePlacement` draws from, so it cannot drift from what the IK will accept.
+ */
+function drawReach(canvas: HTMLCanvasElement, view: THREE.Camera) {
+  const { min, max, yaw } = spec.reach;
+  const heading = spec.heading ?? 0;
+  const arc = (radius: number, from: number, to: number) =>
+    Array.from({ length: 25 }, (_, step) => {
+      const angle = THREE.MathUtils.lerp(from, to, step / 24);
+      const offset = new THREE.Vector3(radius * Math.cos(angle), 0, -radius * Math.sin(angle))
+        .applyAxisAngle(new THREE.Vector3(0, 1, 0), heading);
+      return toPixels(canvas, view, new THREE.Vector3(spec.mount[0] + offset.x, 0, spec.mount[2] + offset.z));
+    });
+  const outline = [...arc(max, -yaw, 0), ...arc(min, 0, -yaw)];
+  const context = canvas.getContext("2d")!;
+  context.save();
+  context.strokeStyle = "rgba(47, 143, 236, 0.85)";
+  context.fillStyle = "rgba(47, 143, 236, 0.10)";
+  context.lineWidth = 1.5;
+  context.beginPath();
+  outline.forEach((at, index) => (index ? context.lineTo(at.x, at.y) : context.moveTo(at.x, at.y)));
+  context.closePath();
+  context.fill();
   context.stroke();
   context.restore();
 }
 
-/** Redrawn with the sensor previews; these views are for aiming, not for frame rate. */
+/** The table, so a height can be judged against the surface things rest on. */
+function drawTableLine(canvas: HTMLCanvasElement, view: THREE.Camera) {
+  const left = toPixels(canvas, view, new THREE.Vector3(-1, 0, pickCentre.y));
+  const right = toPixels(canvas, view, new THREE.Vector3(1, 0, pickCentre.y));
+  const context = canvas.getContext("2d")!;
+  context.save();
+  context.strokeStyle = "rgba(47, 143, 236, 0.85)";
+  context.lineWidth = 1.5;
+  context.setLineDash([6, 4]);
+  context.beginPath();
+  context.moveTo(left.x, left.y);
+  context.lineTo(right.x, right.y);
+  context.stroke();
+  context.restore();
+}
+
+/**
+ * Labelled ticks every 5 cm along both edges.
+ *
+ * Orthographic projection is linear, so a distance on screen is a fixed number of millimetres
+ * anywhere in the picture. Printing the scale turns "about 4 cm to the left" into a pixel count
+ * that can be worked out before clicking, rather than clicked at and corrected.
+ */
+function drawTicks(
+  canvas: HTMLCanvasElement, view: THREE.Camera,
+  across: (value: number) => THREE.Vector3, down: (value: number) => THREE.Vector3,
+  acrossLabel: string, downLabel: string,
+) {
+  const context = canvas.getContext("2d")!;
+  context.save();
+  context.strokeStyle = "rgba(20, 20, 20, 0.55)";
+  context.fillStyle = "rgba(20, 20, 20, 0.85)";
+  context.lineWidth = 1;
+  context.font = "11px monospace";
+  for (let value = -1; value <= 1.0001; value += PICK_TICK) {
+    const rounded = Math.round(value * 100) / 100;
+    const horizontal = toPixels(canvas, view, across(rounded));
+    if (horizontal.x > 24 && horizontal.x < canvas.width - 4) {
+      context.beginPath();
+      context.moveTo(horizontal.x, canvas.height);
+      context.lineTo(horizontal.x, canvas.height - (rounded === 0 ? 14 : 8));
+      context.stroke();
+      context.fillText(rounded.toFixed(2), horizontal.x + 3, canvas.height - 4);
+    }
+    const vertical = toPixels(canvas, view, down(rounded));
+    if (vertical.y > 12 && vertical.y < canvas.height - 18) {
+      context.beginPath();
+      context.moveTo(0, vertical.y);
+      context.lineTo(rounded === 0 ? 14 : 8, vertical.y);
+      context.stroke();
+      context.fillText(rounded.toFixed(2), 3, vertical.y - 3);
+    }
+  }
+  context.fillText(acrossLabel, canvas.width - 18, canvas.height - 18);
+  context.fillText(downLabel, 4, 14);
+  context.restore();
+}
+
+/** Redrawn a few times a second; these views are for aiming, not for frame rate. */
 function renderPickViews(now: number) {
   if (now - lastPickRender < 100) return;
   lastPickRender = now;
-  const point = pickedPoint();
-  for (const pair of [[sideCanvas, sideCamera], [topCanvas, topCamera]] as const) {
-    renderObservationView(pair[1]);
-    pair[0].getContext("2d")!.drawImage(observationRenderer.domElement, 0, 0, pair[0].width, pair[0].height);
-    if (point) drawCross(pair[0], pair[1], point);
+  const target = pickedPoint();
+  const gripper = gripperPoint();
+  if (gripper) {
+    gripperReadout.x.textContent = `${gripper.x.toFixed(3)} m`;
+    gripperReadout.y.textContent = `${gripper.y.toFixed(3)} m`;
+    gripperReadout.z.textContent = `${gripper.z.toFixed(3)} m`;
   }
-  // Context only: the centre camera says which cube is which, the grey views do not.
+
+  renderObservationView(topCamera);
+  topCanvas.getContext("2d")!.drawImage(observationRenderer.domElement, 0, 0, topCanvas.width, topCanvas.height);
+  drawReach(topCanvas, topCamera);
+  drawTicks(
+    topCanvas, topCamera,
+    (value) => new THREE.Vector3(value, 0, pickCentre.y),
+    (value) => new THREE.Vector3(pickCentre.x, 0, value),
+    "X", "Z",
+  );
+
+  renderObservationView(sideCamera);
+  sideCanvas.getContext("2d")!.drawImage(observationRenderer.domElement, 0, 0, sideCanvas.width, sideCanvas.height);
+  drawTableLine(sideCanvas, sideCamera);
+  drawTicks(
+    sideCanvas, sideCamera,
+    (value) => new THREE.Vector3(value, PICK_EYE_HEIGHT, pickCentre.y),
+    (value) => new THREE.Vector3(pickCentre.x, value, pickCentre.y),
+    "X", "Y",
+  );
+
+  // Context only: the centre camera says which cube is which, the flat views do not.
   const centre = sensorCameras.get("overhead");
   if (centre) {
     renderObservationView(centre);
     contextCanvas.getContext("2d")!.drawImage(
       observationRenderer.domElement, 0, 0, contextCanvas.width, contextCanvas.height,
     );
-    if (point) drawCross(contextCanvas, centre, point);
+  }
+
+  for (const pair of [[topCanvas, topCamera], [sideCanvas, sideCamera], [contextCanvas, centre]] as const) {
+    if (!pair[1]) continue;
+    if (gripper) drawCross(pair[0], pair[1], gripper, PICK_BLUE, "NOW");
+    if (target) drawCross(pair[0], pair[1], target, PICK_ORANGE, "GOTO");
   }
 }
 
+/**
+ * The simulation runs on a timer, not on `requestAnimationFrame`.
+ *
+ * rAF is tied to the compositor: it stops when the window is unfocused, minimised or otherwise
+ * not being painted, and in some embedded browsers it never fires at all. This page is meant to
+ * be driven by whoever is looking at it, including an agent reading screenshots of a window it
+ * never focuses, so the clock cannot be the one that stops when nobody is watching.
+ */
+const SIMULATION_INTERVAL_MS = 1000 / 60;
 let previousTime = performance.now();
-function animate(now: number) {
+function animate() {
+  const now = performance.now();
   const deltaSeconds = Math.min((now - previousTime) / 1000, 0.1);
   previousTime = now;
 
-  // Sliders and the view picker both command the motors through `targetValues`. The lag
-  // between command and pose used to be a hand-rolled exponential blend; it now comes from
-  // the arm's own inertia.
+  // The picker commands the motors through `targetValues`, exactly as a slider used to. The lag
+  // between command and pose comes from the arm's own inertia, not from smoothing here.
   const blend = armJoints ? 1 : 1 - Math.exp(-9 * deltaSeconds);
   for (const joint of JOINTS) {
     currentValues[joint.name] = THREE.MathUtils.lerp(
@@ -1600,14 +1752,13 @@ function animate(now: number) {
   // Mounted cameras need their parent link transforms updated before rendering.
   scene.updateMatrixWorld(true);
   renderPickViews(now);
-  requestAnimationFrame(animate);
 }
 
 setupSensorCameras();
 useBackdrop(0);
 newEpisode();
 stepPhysics(PHYSICS_STEP);
-requestAnimationFrame(animate);
+setInterval(animate, SIMULATION_INTERVAL_MS);
 
 resetButton.addEventListener("click", resetPose);
 newSceneButton.addEventListener("click", () => { newEpisode(); clearPick(); });

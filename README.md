@@ -66,6 +66,23 @@ are the right instrument for *where* but a poor one for *which*: flattened and u
 make a red cube and a green one hard to tell apart. The perspective camera answers that, and
 leaves the measurable views to do the measuring.
 
+Three things are drawn over the views, each answering a question that otherwise costs a whole
+look-decide-click round trip:
+
+- **The reachable sector**, outlined on the top view. A point outside it is refused by the IK, and
+  without the outline the only way to discover that is to click and be told no.
+- **`NOW` and `GOTO`**, the gripper's current position and the pending target, marked in all three
+  views. A correction like "3 cm further left" needs to know where the gripper actually is.
+- **Ticks every 5 cm** along both edges. Orthographic projection is linear, so a distance on
+  screen is a fixed number of millimetres anywhere in the picture; printing the scale means the
+  move can be worked out before clicking rather than clicked at and corrected.
+
+The simulation runs on a timer rather than on `requestAnimationFrame`. rAF is tied to the
+compositor: it stops when the window is unfocused or minimised, and in some embedded browsers it
+never fires at all. A page meant to be driven by whoever is looking at it, including an agent
+reading screenshots of a window it never focuses, cannot use the clock that stops when nobody is
+watching.
+
 A straight-down approach is tried first, because that is how the jaws reach a table. Shallower
 pitches down to 30° are fallbacks for points the wrist cannot stand over, and the angle that
 worked is reported along with the residual between the solved pose and the point you asked for. A

@@ -574,3 +574,16 @@ button:disabled {
 .pick-image.is-context {
   max-width: 460px;
 }
+
+.readout-label {
+  color: var(--muted);
+  font-family: "DM Mono", monospace;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  margin: 0 0 6px;
+  text-transform: uppercase;
+}
+
+.pick-readout.is-now dd {
+  color: #2f8fec;
+}
